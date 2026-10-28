@@ -12,6 +12,7 @@ import { TechnicalDocumentationModal } from './components/TechnicalDocumentation
 import { DemoWalkthroughVideoModal } from './components/DemoWalkthroughVideoModal';
 import { SubmissionRecord } from './types';
 import { INITIAL_SUBMISSIONS } from './data/initialSubmissions';
+import { evaluateAndAutoDispatch } from './utils/autoDispatch';
 
 export default function App() {
   const [currentView, setCurrentView] = useState<'citizen' | 'admin'>(() => {
@@ -27,7 +28,7 @@ export default function App() {
       ) {
         return 'citizen';
       }
-      if (hash === '#admin' || params.get('view') === 'admin') {
+      if (hash === '#admin' || hash.startsWith('#admin/') || params.get('view') === 'admin') {
         return 'admin';
       }
     }
@@ -53,7 +54,7 @@ export default function App() {
         params.get('view') === 'portal'
       ) {
         setCurrentView('citizen');
-      } else if (hash === '#admin' || params.get('view') === 'admin') {
+      } else if (hash === '#admin' || hash.startsWith('#admin/') || params.get('view') === 'admin') {
         setCurrentView('admin');
       }
     };
@@ -132,7 +133,7 @@ export default function App() {
             document.getElementById('top');
           el?.scrollIntoView({ behavior: 'smooth', block: 'start' });
         }, 150);
-      } else if (hash === '#admin' || params.get('view') === 'admin') {
+      } else if (hash === '#admin' || hash.startsWith('#admin/') || params.get('view') === 'admin') {
         setCurrentView('admin');
       }
     };
@@ -190,11 +191,31 @@ export default function App() {
   };
 
   const handleNewSubmission = (newSub: SubmissionRecord) => {
+    let autoDispatchEnabled = true;
+    try {
+      const stored = localStorage.getItem('sema_auto_dispatch_enabled');
+      if (stored !== null) {
+        autoDispatchEnabled = stored === 'true';
+      }
+    } catch {
+      // ignore
+    }
+
+    const { record, toastMessage } = evaluateAndAutoDispatch(newSub, autoDispatchEnabled);
+
+    if (toastMessage && typeof window !== 'undefined') {
+      window.dispatchEvent(
+        new CustomEvent('sema:auto-dispatch-toast', {
+          detail: { message: toastMessage },
+        })
+      );
+    }
+
     setSubmissions((prev) => {
-      const exists = prev.some((s) => s.id === newSub.id);
-      const updated = exists ? prev.map((s) => (s.id === newSub.id ? newSub : s)) : [newSub, ...prev];
+      const exists = prev.some((s) => s.id === record.id);
+      const updated = exists ? prev.map((s) => (s.id === record.id ? record : s)) : [record, ...prev];
       try {
-        localStorage.setItem('sema_submissions', JSON.stringify(updated.slice(0, 30)));
+        localStorage.setItem('sema_submissions', JSON.stringify(updated.slice(0, 150)));
       } catch {
         // ignore
       }
@@ -206,7 +227,7 @@ export default function App() {
     setSubmissions((prev) => {
       const updated = prev.map((s) => (s.id === updatedSub.id ? updatedSub : s));
       try {
-        localStorage.setItem('sema_submissions', JSON.stringify(updated.slice(0, 30)));
+        localStorage.setItem('sema_submissions', JSON.stringify(updated.slice(0, 150)));
       } catch {
         // ignore
       }

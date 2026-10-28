@@ -98,6 +98,9 @@ export interface SubmissionRecord {
   isHighTension?: boolean;
   tensionFactors?: string[];
   tensionNotes?: string;
+  // Automatic Dispatch & SLA Tracking
+  needsReview?: boolean;
+  slaStartedAt?: string;
 }
 
 export interface EmailDispatchLog {

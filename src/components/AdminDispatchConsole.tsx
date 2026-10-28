@@ -29,14 +29,22 @@ import {
   MailCheck,
   Eye,
   AtSign,
-  ExternalLink,
   Layers,
-  FileText,
   Radio,
   Trash2,
   Smartphone,
   Hash,
   MessageSquare,
+  Menu,
+  Bell,
+  LayoutDashboard,
+  Inbox,
+  Users,
+  ChevronRight,
+  ChevronLeft,
+  ArrowRight,
+  Maximize2,
+  Minimize2,
 } from 'lucide-react';
 import demoComplaintsData from '../data/demoComplaints.json';
 import {
@@ -50,12 +58,12 @@ import {
   OperationalCategory,
 } from '../types';
 import {
-  MultiChannelFilterDashboard,
   CHANNELS,
   OPERATIONAL_CATEGORIES,
   LOCATIONS,
 } from './MultiChannelFilterDashboard';
-import { IssueClusteringModal } from './IssueClusteringModal';
+import { CLUSTERS } from './IssueClusteringModal';
+import { evaluateAndAutoDispatch } from '../utils/autoDispatch';
 
 export interface StatusLegendItem {
   status: ReportStatus;
@@ -133,6 +141,15 @@ export const STATUS_LEGEND_CONFIG: StatusLegendItem[] = [
   },
 ];
 
+export type AdminPage =
+  | 'overview'
+  | 'incidents'
+  | 'channels'
+  | 'clusters'
+  | 'teams'
+  | 'analytics'
+  | 'alerts';
+
 interface AdminDispatchConsoleProps {
   submissions: SubmissionRecord[];
   onUpdateSubmission: (updated: SubmissionRecord) => void;
@@ -154,10 +171,54 @@ export const AdminDispatchConsole: React.FC<AdminDispatchConsoleProps> = ({
   onOpenTechDocs,
   onSetSubmissions,
 }) => {
+  // Page Navigation State based on URL hash
+  const getInitialPage = (): AdminPage => {
+    if (typeof window !== 'undefined') {
+      const hash = window.location.hash;
+      if (hash === '#admin/incidents') return 'incidents';
+      if (hash === '#admin/channels') return 'channels';
+      if (hash === '#admin/clusters') return 'clusters';
+      if (hash === '#admin/teams') return 'teams';
+      if (hash === '#admin/analytics') return 'analytics';
+      if (hash === '#admin/alerts') return 'alerts';
+    }
+    return 'overview';
+  };
+
+  const [currentPage, setCurrentPage] = useState<AdminPage>(getInitialPage);
+  const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
+  const [isMobileSearchOpen, setIsMobileSearchOpen] = useState(false);
+  const [alertsTab, setAlertsTab] = useState<'officer' | 'customer'>('officer');
+
+  // Sidebar Collapsible State with LocalStorage memory and auto-collapse below 1100px
+  const [isSidebarCollapsed, setIsSidebarCollapsed] = useState<boolean>(() => {
+    if (typeof window !== 'undefined') {
+      try {
+        const stored = localStorage.getItem('sema_admin_sidebar_collapsed');
+        if (stored !== null) return stored === 'true';
+        return window.innerWidth < 1100;
+      } catch {
+        return false;
+      }
+    }
+    return false;
+  });
+
+  // Focus Mode State
+  const [isFocusMode, setIsFocusMode] = useState<boolean>(false);
+
+  // Pagination for Incidents Table (15 rows initially with Load More)
+  const [visibleCount, setVisibleCount] = useState<number>(15);
+
+  // Search & Filters
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedStatus, setSelectedStatus] = useState<string>('All');
   const [selectedTeamFilter, setSelectedTeamFilter] = useState<string>('All');
   const [selectedLanguageFilter, setSelectedLanguageFilter] = useState<string>('All');
+  const [priorityRanking, setPriorityRanking] = useState(true);
+  const [selectedChannel, setSelectedChannel] = useState<string>('All Channels');
+  const [selectedCategory, setSelectedCategory] = useState<string>('All Categories');
+  const [selectedLocation, setSelectedLocation] = useState<string>('All Locations');
 
   // Channel Feeds Sync & Stream State
   const [isSyncingFeeds, setIsSyncingFeeds] = useState(false);
@@ -165,13 +226,7 @@ export const AdminDispatchConsole: React.FC<AdminDispatchConsoleProps> = ({
   const syncTimerRef = useRef<any>(null);
   const syncIndexRef = useRef(0);
 
-  // Multi-Channel Feed, Issue Clustering & Filter States
-  const [activeTab, setActiveTab] = useState<'feed' | 'clusters'>('feed');
-  const [isClusteringModalOpen, setIsClusteringModalOpen] = useState(false);
-  const [priorityRanking, setPriorityRanking] = useState(true);
-  const [selectedChannel, setSelectedChannel] = useState<string>('All Channels');
-  const [selectedCategory, setSelectedCategory] = useState<string>('All Categories');
-  const [selectedLocation, setSelectedLocation] = useState<string>('All Locations');
+  // Status & Feedback States
   const [copiedStepsTicket, setCopiedStepsTicket] = useState<string | null>(null);
   const [inflowToast, setInflowToast] = useState<string | null>(null);
   const [isSimulatingInflow, setIsSimulatingInflow] = useState(false);
@@ -181,7 +236,56 @@ export const AdminDispatchConsole: React.FC<AdminDispatchConsoleProps> = ({
   const [emailSuccessMessage, setEmailSuccessMessage] = useState<string | null>(null);
   const [classifyingId, setClassifyingId] = useState<string | null>(null);
 
-  // Selected report for detailed dispatch modal
+  // Auto-dispatch Engine State (Default ON, backed by localStorage)
+  const [isAutoDispatchEnabled, setIsAutoDispatchEnabled] = useState<boolean>(() => {
+    try {
+      const stored = localStorage.getItem('sema_auto_dispatch_enabled');
+      if (stored !== null) {
+        return stored === 'true';
+      }
+    } catch {
+      // ignore
+    }
+    return true;
+  });
+
+  const handleToggleAutoDispatch = () => {
+    setIsAutoDispatchEnabled((prev) => {
+      const nextVal = !prev;
+      try {
+        localStorage.setItem('sema_auto_dispatch_enabled', String(nextVal));
+      } catch {
+        // ignore
+      }
+      const msg = nextVal
+        ? 'Auto-dispatch enabled: Incoming incidents will automatically route to specialized response teams.'
+        : 'Auto-dispatch disabled: Incoming incidents will hold in Received queue for manual triage.';
+      setInflowToast(msg);
+      setTimeout(() => {
+        setInflowToast((curr) => (curr === msg ? null : curr));
+      }, 3500);
+      return nextVal;
+    });
+  };
+
+  // Toast event listener for auto-dispatch alerts
+  useEffect(() => {
+    const handleAutoDispatchToast = (e: Event) => {
+      const detail = (e as CustomEvent<{ message: string }>).detail;
+      if (detail?.message) {
+        setInflowToast(detail.message);
+        setTimeout(() => {
+          setInflowToast((curr) => (curr === detail.message ? null : curr));
+        }, 4000);
+      }
+    };
+    window.addEventListener('sema:auto-dispatch-toast', handleAutoDispatchToast);
+    return () => {
+      window.removeEventListener('sema:auto-dispatch-toast', handleAutoDispatchToast);
+    };
+  }, []);
+
+  // Selected report for right-side detail drawer & dispatch
   const [inspectingReport, setInspectingReport] = useState<SubmissionRecord | null>(null);
   const [dispatchTeam, setDispatchTeam] = useState<string>('');
   const [dispatchOfficer, setDispatchOfficer] = useState<string>('');
@@ -209,6 +313,66 @@ export const AdminDispatchConsole: React.FC<AdminDispatchConsoleProps> = ({
     aiPowered: boolean;
     compiledAt: string;
   } | null>(null);
+
+  // Auto-collapse sidebar below 1100px wide
+  useEffect(() => {
+    const handleResize = () => {
+      if (typeof window !== 'undefined' && window.innerWidth < 1100) {
+        setIsSidebarCollapsed(true);
+      }
+    };
+    handleResize();
+    window.addEventListener('resize', handleResize);
+    return () => window.removeEventListener('resize', handleResize);
+  }, []);
+
+  // Esc key listener to exit Focus Mode
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && isFocusMode) {
+        setIsFocusMode(false);
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [isFocusMode]);
+
+  // Sidebar toggle with localStorage persistence
+  const toggleSidebar = () => {
+    setIsSidebarCollapsed((prev) => {
+      const next = !prev;
+      try {
+        localStorage.setItem('sema_admin_sidebar_collapsed', String(next));
+      } catch {
+        // ignore
+      }
+      return next;
+    });
+  };
+
+  // Sync hash routing
+  useEffect(() => {
+    const handleHash = () => {
+      const hash = window.location.hash;
+      if (hash === '#admin/incidents') setCurrentPage('incidents');
+      else if (hash === '#admin/channels') setCurrentPage('channels');
+      else if (hash === '#admin/clusters') setCurrentPage('clusters');
+      else if (hash === '#admin/teams') setCurrentPage('teams');
+      else if (hash === '#admin/analytics') setCurrentPage('analytics');
+      else if (hash === '#admin/alerts') setCurrentPage('alerts');
+      else if (hash === '#admin' || hash === '' || hash.startsWith('#admin')) setCurrentPage('overview');
+    };
+
+    window.addEventListener('hashchange', handleHash);
+    return () => window.removeEventListener('hashchange', handleHash);
+  }, []);
+
+  const navigateTo = (page: AdminPage) => {
+    setCurrentPage(page);
+    window.location.hash = page === 'overview' ? 'admin' : `admin/${page}`;
+    setIsMobileMenuOpen(false);
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
 
   // AI-Powered Pie Chart and Issue Analysis Calculation
   const pieChartData = useMemo(() => {
@@ -354,7 +518,7 @@ export const AdminDispatchConsole: React.FC<AdminDispatchConsoleProps> = ({
       const topCat = pieChartData.items[0]?.category || 'Home Fibre & Fixed Internet';
       const topPct = pieChartData.items[0]?.percentage || 45;
       setAiAnalyticsData({
-        executiveSummary: `Safaricom SEMA NOC Synthesis: Fast-compiled ${submissions.length} customer incident tickets across Kenya. Primary ticket concentration is "${topCat}" at ${topPct}% volume. Metro fiber re-splicing crews and M-PESA transaction recovery engineers are prioritized for immediate technical intervention.`,
+        executiveSummary: `Safaricom SEMA Operations Synthesis: Analyzed ${submissions.length} customer incident tickets across Kenya. Primary ticket concentration is "${topCat}" at ${topPct}% volume. Metro fiber re-splicing crews and M-PESA transaction recovery engineers are prioritized for immediate technical intervention.`,
         recommendations: [
           `Dispatch Safaricom metro fiber splicing teams with OTDR fault locators along active red-LOS clusters.`,
           `Re-query core M-PESA B2C/B2B transaction switch reconciliation to achieve 30-minute SLA on hospital and till payments.`,
@@ -372,7 +536,7 @@ export const AdminDispatchConsole: React.FC<AdminDispatchConsoleProps> = ({
     handleCompileAIAnalytics();
   }, [submissions.length]);
 
-  // Metrics computation
+  // Metrics computation (The 4 core KPIs)
   const metrics = useMemo(() => {
     const total = submissions.length;
     const unassigned = submissions.filter((s) => s.status === 'Received' || !s.assignedTeam).length;
@@ -504,7 +668,7 @@ export const AdminDispatchConsole: React.FC<AdminDispatchConsoleProps> = ({
     return counts;
   }, [submissions]);
 
-  // Inflow simulation handler
+  // Inflow simulation handler (Preserved in code)
   const handleSimulateInflowStream = () => {
     setIsSimulatingInflow(true);
     const simulationPool: Array<Omit<SubmissionRecord, 'id' | 'referenceCode' | 'createdAt'>> = [
@@ -541,73 +705,9 @@ export const AdminDispatchConsole: React.FC<AdminDispatchConsoleProps> = ({
           isHighTension: true,
         },
       },
-      {
-        text: 'Customer in Eldoret CBD reports M-PESA paybill transaction stuck on pending confirmation during hospital pharmacy checkout.',
-        detectedLanguage: 'English',
-        category: 'M-PESA & Financial Services',
-        operationalCategory: 'M-PESA',
-        channel: 'Call Center CRM',
-        countyOrWard: 'Uasin Gishu · Eldoret CBD / Uganda Rd',
-        locationTown: 'Eldoret',
-        captureMethod: 'text',
-        aiCommitmentResponse: 'Incident logged. M-PESA core payments desk has initiated transaction query for Eldoret hospital Till.',
-        status: 'Assigned',
-        priority: 'Urgent',
-        assignedTeam: 'M-PESA Escalations & Reversals Operations',
-        assignedOfficer: 'Officer Grace Mwangi',
-        aiRootCause: 'Inter-switch settlement timeout between M-PESA payment core and hospital ERP endpoint.',
-        aiResolutionSteps: [
-          'Query core M-PESA G2 switch ledger for transaction callback confirmation token.',
-          'Force B2B API push notification to Eldoret pharmacy checkout system.',
-          'Transmit customer confirmation SMS with cleared transaction ID.'
-        ],
-        aiClassification: {
-          category: 'M-PESA & Financial Services',
-          urgency: 'Urgent',
-          recommendedTeam: 'M-PESA Escalations & Reversals Operations',
-          rationale: 'Urgent medical checkout payment blocked in Eldoret CBD.',
-          estimatedSLA: '25 minutes',
-          sentiment: 'Urgent',
-          tensionLevel: 'High',
-          frustrationScore: 86,
-          isHighTension: true,
-        },
-      },
-      {
-        text: '@Safaricom_Care Network in Westlands along Mpaka Road has dropped to emergency calls only on all SIM cards.',
-        detectedLanguage: 'English',
-        category: 'Mobile Network & 4G/5G Coverage',
-        operationalCategory: 'Network Outage',
-        channel: 'Twitter (X)',
-        countyOrWard: 'Nairobi · Westlands / Mpaka Rd',
-        locationTown: 'Nairobi',
-        captureMethod: 'text',
-        aiCommitmentResponse: 'Westlands network alert received. Radio Access Network engineering is investigating tower alarms.',
-        status: 'Received',
-        priority: 'High',
-        assignedTeam: '4G / 5G Mobile Network & Base Transceiver (BTS) Team',
-        assignedOfficer: 'Eng. Kevin Ochieng',
-        aiRootCause: 'Main utility power trip on commercial building housing Westlands-04 micro-BTS.',
-        aiResolutionSteps: [
-          'Engage backup battery bank telemetry and dispatch power maintenance lead.',
-          'Reroute traffic to adjacent Chiromo macro cell via antenna beam tilt adjustment.',
-          'Reset optical transceiver card and confirm cell broadcast re-establishment.'
-        ],
-        aiClassification: {
-          category: 'Mobile Network & 4G/5G Coverage',
-          urgency: 'High',
-          recommendedTeam: '4G / 5G Mobile Network & Base Transceiver (BTS) Team',
-          rationale: 'Commercial hub micro-BTS power loss in Westlands.',
-          estimatedSLA: '2 hours',
-          sentiment: 'Frustrated',
-          tensionLevel: 'Elevated',
-          frustrationScore: 70,
-          isHighTension: false,
-        },
-      },
     ];
 
-    const randomItem = simulationPool[Math.floor(Math.random() * simulationPool.length)];
+    const randomItem = simulationPool[0];
     const randNum = Math.floor(1000 + Math.random() * 9000);
     const newSub: SubmissionRecord = {
       ...randomItem,
@@ -622,136 +722,167 @@ export const AdminDispatchConsole: React.FC<AdminDispatchConsoleProps> = ({
       onUpdateSubmission(newSub);
     }
 
-    setInflowToast(`⚡ Incoming Feed: ${newSub.channel} complaint registered [${newSub.referenceCode}]`);
+    setInflowToast(`Incoming Feed: ${newSub.channel} complaint registered [${newSub.referenceCode}]`);
     setTimeout(() => setInflowToast(null), 4000);
     setIsSimulatingInflow(false);
   };
 
-  // Helper to build a full SubmissionRecord through the normal submission and AI classification pipeline
-  const classifyAndBuildSyncedRecord = (record: (typeof demoComplaintsData.records)[0]): SubmissionRecord => {
-    const minutesAgo = record.minutesAgo || 0;
-    const createdAt = new Date(Date.now() - minutesAgo * 60 * 1000).toISOString();
-    const lower = (record.text || '').toLowerCase();
-
-    // AI Classification & Team routing mapping based on operational category and text
-    let categoryName = 'Home Fibre & Fixed Internet';
-    let recommendedTeam = 'Safaricom Home Fibre & Enterprise NOC';
-    let officer = 'Eng. Dennis Kiprono';
-    let officerEmail = 'dennis.kiprono@safaricom.co.ke';
-    let urgency: PriorityLevel = 'Medium';
-    let estimatedSLA = '2 hours';
-    let rootCause = 'Optical distribution attenuation or transmission loss.';
-    let steps: string[] = [
-      'Dispatch field technician to inspect local node distribution cabinet.',
-      'Test signal attenuation and verify optical power levels below -24 dBm.',
-      'Send automated resolution update to customer via their preferred channel.',
-    ];
-
+  // Rule-based priority determination for seeded records based on operationalCategory and keywords
+  const determineSeedPriority = (operationalCategory: string, text: string): PriorityLevel => {
+    const lower = (text || '').toLowerCase();
     if (
-      record.operationalCategory === 'Fibre' ||
+      lower.includes('down') ||
+      lower.includes('outage') ||
+      lower.includes('imekatika') ||
+      lower.includes('cut') ||
+      lower.includes('los') ||
+      lower.includes('red') ||
+      lower.includes('hospital') ||
+      lower.includes('emergency') ||
+      lower.includes('stuck') ||
+      lower.includes('pending') ||
+      lower.includes('deducted') ||
+      lower.includes('sim swap') ||
+      lower.includes('fraud') ||
+      lower.includes('theft') ||
+      lower.includes('hazard') ||
+      lower.includes('moto') ||
+      (operationalCategory === 'Fibre' && (lower.includes('red') || lower.includes('down') || lower.includes('los'))) ||
+      (operationalCategory === 'M-PESA' && (lower.includes('stuck') || lower.includes('hospital') || lower.includes('pending') || lower.includes('deducted')))
+    ) {
+      return 'Urgent';
+    }
+    if (
+      lower.includes('slow') ||
+      lower.includes('speed') ||
+      lower.includes('buffer') ||
+      lower.includes('dropped') ||
+      lower.includes('signal') ||
+      lower.includes('coverage') ||
+      lower.includes('blackout') ||
+      lower.includes('mast') ||
+      lower.includes('tower') ||
+      operationalCategory === 'Slow Internet' ||
+      operationalCategory === 'Coverage'
+    ) {
+      return 'High';
+    }
+    if (
+      lower.includes('airtime') ||
+      lower.includes('bundle') ||
+      lower.includes('invoice') ||
+      lower.includes('balance') ||
+      lower.includes('bonga') ||
+      operationalCategory === 'Billing'
+    ) {
+      return 'Medium';
+    }
+    return 'Medium';
+  };
+
+  // Helper to map operational category and keywords to official Safaricom department and team
+  const getCategoryAndTeamForSeed = (operationalCategory: string, text: string) => {
+    const lower = (text || '').toLowerCase();
+    if (
+      operationalCategory === 'Fibre' ||
       lower.includes('fibre') ||
       lower.includes('fiber') ||
       lower.includes('router') ||
       lower.includes('ont')
     ) {
-      categoryName = 'Home Fibre & Fixed Internet';
-      recommendedTeam = 'Safaricom Home Fibre & Enterprise NOC';
-      officer = 'Eng. Dennis Kiprono';
-      officerEmail = 'dennis.kiprono@safaricom.co.ke';
-      urgency = 'Urgent';
-      estimatedSLA = '2 hours';
-      rootCause = 'Optical drop cable cut / distribution node failure in local cluster.';
-      steps = [
-        'Dispatch field metro splicing crew equipped with OTDR fault locator to local cluster pole.',
-        'Re-splice optical core fibers and measure power level at distribution cabinet.',
-        'Re-bind ONT MAC address in OLT terminal and broadcast restoration confirmation.',
-      ];
-    } else if (
-      record.operationalCategory === 'M-PESA' ||
+      return {
+        category: 'Home Fibre & Fixed Internet',
+        team: 'Safaricom Home Fibre & Enterprise NOC',
+        officer: 'Eng. Dennis Kiprono',
+        email: 'dennis.kiprono@safaricom.co.ke',
+        sla: '2 hours',
+        rationale: 'Optical fiber link disruption reported on customer endpoint.',
+        rootCause: 'Optical distribution attenuation or feeder cable fault.',
+      };
+    }
+    if (
+      operationalCategory === 'M-PESA' ||
       lower.includes('m-pesa') ||
+      lower.includes('mpesa') ||
       lower.includes('till') ||
       lower.includes('paybill') ||
       lower.includes('reversal')
     ) {
-      categoryName = 'M-PESA & Financial Services';
-      recommendedTeam = 'M-PESA Escalations & Reversals Operations';
-      officer = 'Officer Grace Mwangi';
-      officerEmail = 'grace.mwangi@safaricom.co.ke';
-      urgency = 'Urgent';
-      estimatedSLA = '30 minutes';
-      rootCause = 'Inter-switch settlement timeout between M-PESA payment core and merchant API.';
-      steps = [
-        'Interrogate core M-PESA G2 transaction switch logs for MSISDN ledger reference and confirmation token.',
-        'Execute forced B2B settlement callback push to merchant / hospital account API.',
-        'Dispatch automated high-priority SMS confirmation to customer and transaction liaison.',
-      ];
-    } else if (
-      record.operationalCategory === 'Slow Internet' ||
-      lower.includes('speed') ||
-      lower.includes('slow') ||
-      lower.includes('mbps') ||
-      lower.includes('buffer')
-    ) {
-      categoryName = 'Mobile Network & 4G/5G Coverage';
-      recommendedTeam = '4G / 5G Mobile Network & Base Transceiver (BTS) Team';
-      officer = 'Supervisor Brian Otieno';
-      officerEmail = 'brian.otieno@safaricom.co.ke';
-      urgency = 'High';
-      estimatedSLA = '4 hours';
-      rootCause = 'High sector congestion or microwave backhaul packet latency.';
-      steps = [
-        'Interrogate BTS sector utilization logs and microwave backhaul bandwidth allocation.',
-        'Execute dynamic carrier frequency rebalancing across 4G/5G micro cells.',
-        'Confirm radio channel quality and throughput restoration above 15 Mbps.',
-      ];
-    } else if (
-      record.operationalCategory === 'Billing' ||
-      lower.includes('airtime') ||
-      lower.includes('invoice') ||
-      lower.includes('balance') ||
-      lower.includes('bonga')
-    ) {
-      categoryName = 'Customer Care & Airtime Billing';
-      recommendedTeam = 'Customer Experience & Airtime Billing Desk';
-      officer = 'Coordinator Agnes Muthoni';
-      officerEmail = 'agnes.muthoni@safaricom.co.ke';
-      urgency = 'Medium';
-      estimatedSLA = '6 hours';
-      rootCause = 'Transaction reconciliation delay between billing switch and subscriber balance ledger.';
-      steps = [
-        'Audit transaction reference code against billing ledger gateway.',
-        'Apply credit reversal or airtime adjustment to subscriber MSISDN.',
-        'Dispatch automated confirmation SMS to subscriber.',
-      ];
-    } else if (record.operationalCategory === 'Voice Calls' || lower.includes('call') || lower.includes('voice')) {
-      categoryName = 'Mobile Network & 4G/5G Coverage';
-      recommendedTeam = '4G / 5G Mobile Network & Base Transceiver (BTS) Team';
-      officer = 'Supervisor Brian Otieno';
-      officerEmail = 'brian.otieno@safaricom.co.ke';
-      urgency = 'Medium';
-      estimatedSLA = '12 hours';
-      rootCause = '2G/3G handover failure or local roaming sector attenuation.';
-      steps = [
-        'Perform drive-test telemetry diagnostic for coverage zone sectors.',
-        'Adjust antenna electrical down-tilt to minimize dead-zone coverage.',
-        'Validate successful voice channel call setup with test SIM.',
-      ];
-    } else {
-      categoryName = 'SIM Swap, Fraud & Security';
-      recommendedTeam = 'SIM Swap, Identity Protection & Cyber-Fraud Unit';
-      officer = 'Insp. Hassan Ali';
-      officerEmail = 'hassan.ali@safaricom.co.ke';
-      urgency = 'High';
-      estimatedSLA = '2 hours';
-      rootCause = 'Identity verification check or PUK unlock procedure required.';
-      steps = [
-        'Verify National ID and registration biometric record in KYC portal.',
-        'Issue self-service PUK / unblock credential to authorized customer MSISDN.',
-        'Document security log entry and notify user via verified channel.',
-      ];
+      return {
+        category: 'M-PESA & Financial Services',
+        team: 'M-PESA Escalations & Reversals Operations',
+        officer: 'Officer Grace Mwangi',
+        email: 'grace.mwangi@safaricom.co.ke',
+        sla: '30 minutes',
+        rationale: 'M-PESA financial transaction ledger reconciliation required.',
+        rootCause: 'Inter-switch settlement timeout between payment switch and merchant API.',
+      };
     }
+    if (
+      operationalCategory === 'Billing' ||
+      lower.includes('airtime') ||
+      lower.includes('bundle') ||
+      lower.includes('invoice') ||
+      lower.includes('balance')
+    ) {
+      return {
+        category: 'Customer Care & Airtime Billing',
+        team: 'Customer Experience & Airtime Billing Desk',
+        officer: 'Coordinator Agnes Muthoni',
+        email: 'agnes.muthoni@safaricom.co.ke',
+        sla: '6 hours',
+        rationale: 'Account airtime balance or subscription deduction review.',
+        rootCause: 'Transaction reconciliation delay between billing switch and subscriber balance ledger.',
+      };
+    }
+    if (
+      operationalCategory === 'Slow Internet' ||
+      operationalCategory === 'Voice Calls' ||
+      operationalCategory === 'Coverage' ||
+      lower.includes('call') ||
+      lower.includes('network') ||
+      lower.includes('4g') ||
+      lower.includes('5g')
+    ) {
+      return {
+        category: 'Mobile Network & 4G/5G Coverage',
+        team: '4G / 5G Mobile Network & Base Transceiver (BTS) Team',
+        officer: 'Supervisor Brian Otieno',
+        email: 'brian.otieno@safaricom.co.ke',
+        sla: '4 hours',
+        rationale: 'Radio Access Network (RAN) sector optimization or cellular signal loss.',
+        rootCause: 'High sector congestion or microwave backhaul packet latency.',
+      };
+    }
+    if (lower.includes('swap') || lower.includes('fraud') || lower.includes('puk') || lower.includes('hack')) {
+      return {
+        category: 'SIM Swap, Fraud & Security',
+        team: 'SIM Swap, Identity Protection & Cyber-Fraud Unit',
+        officer: 'Insp. Hassan Ali',
+        email: 'hassan.ali@safaricom.co.ke',
+        sla: '1 hour',
+        rationale: 'Security escalation or identity verification required.',
+        rootCause: 'Identity verification check or PUK unlock procedure required.',
+      };
+    }
+    return {
+      category: 'Customer Care & Airtime Billing',
+      team: 'Customer Experience & Airtime Billing Desk',
+      officer: 'Coordinator Agnes Muthoni',
+      email: 'agnes.muthoni@safaricom.co.ke',
+      sla: '12 hours',
+      rationale: 'General customer operational inquiry.',
+      rootCause: 'General subscriber query.',
+    };
+  };
 
-    // Derive locationTown
+  // Helper to build a full SubmissionRecord through rule-based classification (Zero Gemini calls)
+  const classifyAndBuildSyncedRecord = (record: (typeof demoComplaintsData.records)[0]): SubmissionRecord => {
+    const minutesAgo = record.minutesAgo || 0;
+    const createdAt = new Date(Date.now() - minutesAgo * 60 * 1000).toISOString();
+    const priority = determineSeedPriority(record.operationalCategory, record.text);
+    const meta = getCategoryAndTeamForSeed(record.operationalCategory, record.text);
+
     let locationTown = 'Nairobi';
     const cw = (record.countyOrWard || '').toLowerCase();
     if (cw.includes('ruaka')) locationTown = 'Ruaka';
@@ -762,23 +893,27 @@ export const AdminDispatchConsole: React.FC<AdminDispatchConsoleProps> = ({
     else if (cw.includes('nyeri')) locationTown = 'Nyeri';
     else if (cw.includes('kiambu')) locationTown = 'Kiambu';
 
-    const frustration = urgency === 'Urgent' ? 88 : urgency === 'High' ? 65 : 35;
-    const isHighTension = frustration >= 70 || urgency === 'Urgent';
+    const frustration = priority === 'Urgent' ? 88 : priority === 'High' ? 65 : 35;
+    const isHighTension = frustration >= 70 || priority === 'Urgent';
+
+    const isCategoryKnown = Boolean(meta.category && meta.team);
+    const confidenceScore = isCategoryKnown ? 0.94 : 0.45;
 
     const aiClassification: AIClassification = {
-      category: categoryName,
-      urgency,
-      recommendedTeam,
-      rationale: `Classified via SEMA automated channel ingestion pipeline for ${record.inflowChannel}.`,
-      estimatedSLA,
+      category: meta.category,
+      urgency: priority,
+      recommendedTeam: meta.team,
+      confidenceScore,
+      rationale: `${meta.rationale} Ingested via ${record.inflowChannel}.`,
+      estimatedSLA: meta.sla,
       sentiment: isHighTension ? 'Frustrated' : 'Neutral',
       tensionLevel: isHighTension ? 'High' : 'Standard',
       frustrationScore: frustration,
       isHighTension,
       tensionFactors: [`Inflow channel: ${record.inflowChannel}`, `${record.countyOrWard} incident`],
       tensionNotes: isHighTension
-        ? 'Elevated customer tension requiring rapid team dispatch.'
-        : 'Standard operational priority.',
+        ? 'Elevated customer urgency flagged for rapid team response.'
+        : 'Standard operational SLA window.',
     };
 
     const randCode = Math.floor(1000 + Math.random() * 9000);
@@ -788,17 +923,17 @@ export const AdminDispatchConsole: React.FC<AdminDispatchConsoleProps> = ({
       text: record.text,
       detectedLanguage: (record.detectedLanguage as any) || 'English',
       englishTranslation: record.detectedLanguage !== 'English' ? `Translation: ${record.text}` : undefined,
-      category: categoryName,
+      category: meta.category,
       countyOrWard: record.countyOrWard,
       locationTown,
       contactInfo: record.contactInfo || undefined,
       captureMethod: record.inflowChannel === 'Web Voice Portal' ? 'voice' : 'text',
-      aiCommitmentResponse: `SEMA automated dispatch: Incident logged via ${record.inflowChannel} from ${record.countyOrWard}. Dispatched to ${recommendedTeam}.`,
+      aiCommitmentResponse: `SEMA automated dispatch: Incident logged via ${record.inflowChannel} from ${record.countyOrWard}. Dispatched to ${meta.team}.`,
       status: 'Received',
-      priority: urgency,
-      assignedTeam: recommendedTeam,
-      assignedOfficer: officer,
-      assignedOfficerEmail: officerEmail,
+      priority,
+      assignedTeam: undefined,
+      assignedOfficer: undefined,
+      assignedOfficerEmail: undefined,
       channel: record.inflowChannel as InflowChannel,
       operationalCategory: record.operationalCategory as any,
       handle: record.handle || undefined,
@@ -806,8 +941,9 @@ export const AdminDispatchConsole: React.FC<AdminDispatchConsoleProps> = ({
       longitude: typeof record.longitude === 'number' ? record.longitude : undefined,
       isSyncedFeed: true,
       aiClassification,
-      aiResolutionSteps: steps,
-      aiRootCause: rootCause,
+      // Resolution steps are generated ONLY when a ticket is opened, and cached
+      aiResolutionSteps: undefined,
+      aiRootCause: meta.rootCause,
       sentiment: aiClassification.sentiment,
       tensionLevel: aiClassification.tensionLevel,
       frustrationScore: aiClassification.frustrationScore,
@@ -818,7 +954,74 @@ export const AdminDispatchConsole: React.FC<AdminDispatchConsoleProps> = ({
     };
   };
 
-  // Cleanup sync feed timer on unmount
+  // Helper to generate informed AI resolution steps only when ticket is inspected
+  const generateResolutionStepsForTicket = (report: SubmissionRecord): string[] => {
+    const cat = report.category || '';
+    const opCat = report.operationalCategory || '';
+    const lower = (report.text || '').toLowerCase();
+
+    if (
+      cat.includes('Fibre') ||
+      opCat === 'Fibre' ||
+      lower.includes('fibre') ||
+      lower.includes('fiber') ||
+      lower.includes('los') ||
+      lower.includes('router')
+    ) {
+      return [
+        'Dispatch field metro optical splicing crew with OTDR fault locator to local cluster distribution point.',
+        'Re-splice severed core fibers and verify optical receive power level below -24 dBm at cabinet.',
+        'Re-bind ONT MAC address in OLT terminal and broadcast optical link recovery confirmation.',
+      ];
+    }
+    if (
+      cat.includes('M-PESA') ||
+      opCat === 'M-PESA' ||
+      lower.includes('mpesa') ||
+      lower.includes('m-pesa') ||
+      lower.includes('till') ||
+      lower.includes('paybill') ||
+      lower.includes('reversal')
+    ) {
+      return [
+        'Interrogate core M-PESA G2 transaction switch logs for MSISDN ledger reference and confirmation token.',
+        'Execute forced B2B settlement callback push to merchant / hospital account API gateway.',
+        'Dispatch automated high-priority SMS confirmation to customer and transaction liaison.',
+      ];
+    }
+    if (
+      cat.includes('SIM Swap') ||
+      cat.includes('Fraud') ||
+      lower.includes('swap') ||
+      lower.includes('fraud') ||
+      lower.includes('puk')
+    ) {
+      return [
+        'Verify National ID and registration biometric record in Safaricom KYC security portal.',
+        'Execute immediate temporary block on suspect MSISDN to prevent unauthorized transaction routing.',
+        'Issue authorized PUK / new SIM activation token and record incident in security fraud registry.',
+      ];
+    }
+    if (
+      cat.includes('Billing') ||
+      opCat === 'Billing' ||
+      lower.includes('airtime') ||
+      lower.includes('invoice') ||
+      lower.includes('bonga')
+    ) {
+      return [
+        'Audit transaction reference code against billing ledger gateway and bundle ledger.',
+        'Apply credit reversal or airtime adjustment to subscriber MSISDN balance.',
+        'Dispatch automated confirmation SMS to subscriber confirming account reconciliation.',
+      ];
+    }
+    return [
+      'Interrogate BTS sector utilization telemetry and microwave backhaul bandwidth allocation.',
+      'Execute dynamic carrier frequency rebalancing across local 4G/5G micro cells.',
+      'Perform radio channel diagnostic and confirm voice call handover and data throughput recovery.',
+    ];
+  };
+
   useEffect(() => {
     return () => {
       if (syncTimerRef.current) {
@@ -835,31 +1038,31 @@ export const AdminDispatchConsole: React.FC<AdminDispatchConsoleProps> = ({
     setIsSyncingFeeds(false);
   };
 
-  // Sync Channel Feeds: sends each record through submission & AI classification pipeline, one every 1 to 2 seconds
-  const handleToggleSyncFeeds = () => {
-    if (isSyncingFeeds) {
-      stopFeedsSync();
-      setInflowToast('⏸️ Channel feeds sync paused.');
-      setTimeout(() => setInflowToast(null), 3000);
-      return;
-    }
-
+  // Start background or manual feeds sync (1 ticket every 850ms, i.e. 0.7s to 1s)
+  const startSyncingFeedsProcess = (startIdx = 0) => {
     const records = demoComplaintsData?.records || [];
     if (records.length === 0) return;
 
-    setIsSyncingFeeds(true);
-    setSyncProgress({ current: syncIndexRef.current, total: records.length });
-    setInflowToast('🚀 Channel feeds sync started (1 record every ~1.5s)...');
-    setTimeout(() => setInflowToast(null), 3000);
+    if (syncTimerRef.current) {
+      clearInterval(syncTimerRef.current);
+      syncTimerRef.current = null;
+    }
 
-    const stepSync = async () => {
+    setIsSyncingFeeds(true);
+    syncIndexRef.current = startIdx;
+    setSyncProgress({ current: startIdx, total: records.length });
+
+    const stepSync = () => {
       const idx = syncIndexRef.current;
       if (idx >= records.length) {
         stopFeedsSync();
-        syncIndexRef.current = 0;
+        syncIndexRef.current = records.length;
         setSyncProgress({ current: records.length, total: records.length });
-        setInflowToast('🎉 All 30 demo channel feeds synced successfully!');
-        setTimeout(() => setInflowToast(null), 4000);
+        try {
+          localStorage.setItem('sema_synced_feeds_completed', 'true');
+        } catch {
+          // ignore
+        }
         return;
       }
 
@@ -867,48 +1070,18 @@ export const AdminDispatchConsole: React.FC<AdminDispatchConsoleProps> = ({
       syncIndexRef.current = idx + 1;
       setSyncProgress({ current: idx + 1, total: records.length });
 
-      // Build record through the normal submission & AI classification pipeline
-      let finalRecord = classifyAndBuildSyncedRecord(raw);
+      // Build record rule-based without calling Gemini
+      const initialRecord = classifyAndBuildSyncedRecord(raw);
 
-      // Attempt server submission for consistency with /api/submissions
-      try {
-        const resp = await fetch('/api/submissions', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            id: raw.id,
-            text: raw.text,
-            countyOrWard: raw.countyOrWard,
-            contactInfo: raw.contactInfo,
-            captureMethod: raw.inflowChannel === 'Web Voice Portal' ? 'voice' : 'text',
-            channel: raw.inflowChannel,
-            operationalCategory: raw.operationalCategory,
-            latitude: raw.latitude,
-            longitude: raw.longitude,
-            handle: raw.handle,
-            createdAt: finalRecord.createdAt,
-            isSyncedFeed: true,
-          }),
-        });
-        if (resp.ok) {
-          const data = await resp.json();
-          if (data?.submission) {
-            finalRecord = {
-              ...finalRecord,
-              ...data.submission,
-              id: raw.id,
-              channel: raw.inflowChannel as InflowChannel,
-              handle: raw.handle || undefined,
-              latitude: raw.latitude,
-              longitude: raw.longitude,
-              isSyncedFeed: true,
-              aiResolutionSteps: finalRecord.aiResolutionSteps,
-              aiRootCause: finalRecord.aiRootCause,
-            };
-          }
-        }
-      } catch {
-        // Fallback to locally classified finalRecord
+      // Evaluate for automated dispatch based on category mapping & safety rules
+      const evaluation = evaluateAndAutoDispatch(initialRecord, isAutoDispatchEnabled);
+      const finalRecord = evaluation.record;
+
+      if (evaluation.toastMessage) {
+        setInflowToast(evaluation.toastMessage);
+        setTimeout(() => {
+          setInflowToast((curr) => (curr === evaluation.toastMessage ? null : curr));
+        }, 3500);
       }
 
       if (onNewSubmission) {
@@ -917,18 +1090,70 @@ export const AdminDispatchConsole: React.FC<AdminDispatchConsoleProps> = ({
         onUpdateSubmission(finalRecord);
       }
 
-      setInflowToast(
-        `⚡ Synced feed [${raw.inflowChannel}] ${raw.handle ? raw.handle + ' ' : ''}[${finalRecord.referenceCode}] (${idx + 1}/${records.length})`
-      );
-      setTimeout(() => setInflowToast(null), 3000);
+      if (idx + 1 >= records.length) {
+        stopFeedsSync();
+        try {
+          localStorage.setItem('sema_synced_feeds_completed', 'true');
+        } catch {
+          // ignore
+        }
+      }
     };
 
-    // Execute first immediately, then interval every 1500ms (1 to 2 seconds)
     stepSync();
-    syncTimerRef.current = setInterval(stepSync, 1500);
+    // 850ms interval fulfills requirement (0.7 to 1 second)
+    syncTimerRef.current = setInterval(stepSync, 850);
   };
 
-  // Clear Synced Feeds: removes all synced records from queue and store
+  // Automatic feed sync on initial load if no synced feeds exist
+  const autoSyncStartedRef = useRef(false);
+  useEffect(() => {
+    if (autoSyncStartedRef.current) return;
+
+    try {
+      const isCompleted = localStorage.getItem('sema_synced_feeds_completed');
+      if (isCompleted === 'true' || isCompleted === 'cleared') {
+        return;
+      }
+    } catch {
+      // ignore
+    }
+
+    const syncedIds = new Set(demoComplaintsData?.records?.map((r) => r.id) || []);
+    const hasSynced = submissions.some(
+      (s) => s.isSyncedFeed || syncedIds.has(s.id) || s.id.startsWith('sema-sync-')
+    );
+
+    if (hasSynced) {
+      try {
+        localStorage.setItem('sema_synced_feeds_completed', 'true');
+      } catch {
+        // ignore
+      }
+      return;
+    }
+
+    // Start background sync automatically with no button press
+    autoSyncStartedRef.current = true;
+    startSyncingFeedsProcess(0);
+  }, [submissions]);
+
+  // Manual sync button on Channel Feeds page
+  const handleToggleSyncFeeds = () => {
+    if (isSyncingFeeds) {
+      stopFeedsSync();
+      setInflowToast('Channel feeds sync paused.');
+      setTimeout(() => setInflowToast(null), 3000);
+      return;
+    }
+
+    const records = demoComplaintsData?.records || [];
+    if (records.length === 0) return;
+
+    const startFrom = syncIndexRef.current >= records.length ? 0 : syncIndexRef.current;
+    startSyncingFeedsProcess(startFrom);
+  };
+
   const handleClearSyncedFeeds = async () => {
     stopFeedsSync();
     syncIndexRef.current = 0;
@@ -944,7 +1169,8 @@ export const AdminDispatchConsole: React.FC<AdminDispatchConsoleProps> = ({
     }
 
     try {
-      localStorage.setItem('sema_submissions', JSON.stringify(remaining.slice(0, 30)));
+      localStorage.setItem('sema_synced_feeds_completed', 'cleared');
+      localStorage.setItem('sema_submissions', JSON.stringify(remaining.slice(0, 150)));
     } catch {
       // ignore
     }
@@ -956,11 +1182,11 @@ export const AdminDispatchConsole: React.FC<AdminDispatchConsoleProps> = ({
     }
 
     const removedCount = submissions.length - remaining.length;
-    setInflowToast(`🗑️ Cleared synced feeds (${removedCount} records removed)`);
+    setInflowToast(`Cleared synced feeds (${removedCount} records removed)`);
     setTimeout(() => setInflowToast(null), 3500);
   };
 
-  // Synced feeds count
+
   const syncedFeedsCount = useMemo(() => {
     const syncedIds = new Set(demoComplaintsData?.records?.map((r) => r.id) || []);
     return submissions.filter(
@@ -974,72 +1200,72 @@ export const AdminDispatchConsole: React.FC<AdminDispatchConsoleProps> = ({
     switch (ch) {
       case 'Zuri':
         return (
-          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-purple-100 text-purple-900 border border-purple-300 shadow-2xs">
-            <Bot className="w-3 h-3 text-purple-700 shrink-0" />
+          <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[10px] font-bold bg-purple-100 text-purple-900 border border-purple-300 shrink-0">
+            <Bot className="w-2.5 h-2.5 text-purple-700 shrink-0" />
             <span>Zuri</span>
           </span>
         );
       case 'One App':
         return (
-          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-teal-100 text-teal-900 border border-teal-300 shadow-2xs">
-            <Smartphone className="w-3 h-3 text-teal-700 shrink-0" />
+          <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[10px] font-bold bg-teal-100 text-teal-900 border border-teal-300 shrink-0">
+            <Smartphone className="w-2.5 h-2.5 text-teal-700 shrink-0" />
             <span>One App</span>
           </span>
         );
       case 'USSD':
         return (
-          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-100 text-amber-900 border border-amber-300 shadow-2xs">
-            <Hash className="w-3 h-3 text-amber-700 shrink-0" />
+          <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[10px] font-bold bg-amber-100 text-amber-900 border border-amber-300 shrink-0">
+            <Hash className="w-2.5 h-2.5 text-amber-700 shrink-0" />
             <span>USSD</span>
           </span>
         );
       case 'WhatsApp':
         return (
-          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-100 text-emerald-900 border border-emerald-300 shadow-2xs">
-            <MessageSquare className="w-3 h-3 text-emerald-700 shrink-0" />
+          <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[10px] font-bold bg-emerald-100 text-emerald-900 border border-emerald-300 shrink-0">
+            <MessageSquare className="w-2.5 h-2.5 text-emerald-700 shrink-0" />
             <span>WhatsApp</span>
           </span>
         );
       case 'Twitter (X)':
         return (
-          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-slate-900 text-white border border-slate-700 shadow-2xs">
-            <AtSign className="w-3 h-3 text-slate-300 shrink-0" />
-            <span>Twitter (X)</span>
+          <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[10px] font-bold bg-slate-900 text-white border border-slate-700 shrink-0">
+            <AtSign className="w-2.5 h-2.5 text-slate-300 shrink-0" />
+            <span>Twitter</span>
           </span>
         );
       case 'LinkedIn':
         return (
-          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-sky-100 text-sky-900 border border-sky-300 shadow-2xs">
-            <Building2 className="w-3 h-3 text-sky-700 shrink-0" />
+          <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[10px] font-bold bg-sky-100 text-sky-900 border border-sky-300 shrink-0">
+            <Building2 className="w-2.5 h-2.5 text-sky-700 shrink-0" />
             <span>LinkedIn</span>
           </span>
         );
       case 'Instagram':
         return (
-          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-rose-100 text-rose-900 border border-rose-300 shadow-2xs">
-            <Eye className="w-3 h-3 text-rose-700 shrink-0" />
+          <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[10px] font-bold bg-rose-100 text-rose-900 border border-rose-300 shrink-0">
+            <Eye className="w-2.5 h-2.5 text-rose-700 shrink-0" />
             <span>Instagram</span>
           </span>
         );
       case 'Email':
         return (
-          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-indigo-100 text-indigo-900 border border-indigo-300 shadow-2xs">
-            <Mail className="w-3 h-3 text-indigo-700 shrink-0" />
+          <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[10px] font-bold bg-indigo-100 text-indigo-900 border border-indigo-300 shrink-0">
+            <Mail className="w-2.5 h-2.5 text-indigo-700 shrink-0" />
             <span>Email</span>
           </span>
         );
       case 'Web Voice Portal':
         return (
-          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-cyan-100 text-cyan-900 border border-cyan-300 shadow-2xs">
-            <Volume2 className="w-3 h-3 text-cyan-700 shrink-0" />
+          <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[10px] font-bold bg-cyan-100 text-cyan-900 border border-cyan-300 shrink-0">
+            <Volume2 className="w-2.5 h-2.5 text-cyan-700 shrink-0" />
             <span>Web Voice</span>
           </span>
         );
       case 'Call Center CRM':
       default:
         return (
-          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-slate-100 text-slate-800 border border-slate-300 shadow-2xs">
-            <Phone className="w-3 h-3 text-slate-600 shrink-0" />
+          <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[10px] font-bold bg-slate-100 text-slate-800 border border-slate-300 shrink-0">
+            <Phone className="w-2.5 h-2.5 text-slate-600 shrink-0" />
             <span>{ch || 'Call Center'}</span>
           </span>
         );
@@ -1167,7 +1393,7 @@ ${report.englishTranslation ? `\nEnglish Translation:\n"${report.englishTranslat
 ${report.contactInfo ? `Customer Line / Contact: ${report.contactInfo}` : 'Customer Contact: Anonymous / SEMA Portal'}
 
 ------------------------------------------------------
-DISPATCH & AI ROUTING DIRECTIVES:
+DISPATCH DIRECTIVES:
 ------------------------------------------------------
 Routing Rationale: ${report.aiClassification?.rationale || 'Dispatched for immediate technical inspection and fault rectification.'}
 Admin Directives:  ${adminNotes || report.adminNotes || 'Proceed with standard Safaricom emergency response operating procedure.'}
@@ -1184,26 +1410,36 @@ Automated alert dispatched by Safaricom SEMA Intelligent NOC Operations.
     return { subject, body };
   };
 
-  // Open modal for manual inspection & dispatch
+  // Open right-side panel for inspection & dispatch
   const handleOpenInspect = (report: SubmissionRecord) => {
-    setInspectingReport(report);
+    let activeReport = report;
+    // Generate AI resolution steps ONLY when a ticket is opened, and cache the result
+    if (!report.aiResolutionSteps || report.aiResolutionSteps.length === 0) {
+      const generatedSteps = generateResolutionStepsForTicket(report);
+      activeReport = {
+        ...report,
+        aiResolutionSteps: generatedSteps,
+      };
+      onUpdateSubmission(activeReport);
+    }
+
+    setInspectingReport(activeReport);
     const initialTeamName =
-      report.assignedTeam || report.aiClassification?.recommendedTeam || KENYAN_RESPONSE_TEAMS[0].name;
+      activeReport.assignedTeam || activeReport.aiClassification?.recommendedTeam || KENYAN_RESPONSE_TEAMS[0].name;
     setDispatchTeam(initialTeamName);
 
     const matchedTeam =
       KENYAN_RESPONSE_TEAMS.find((t) => t.name === initialTeamName) || KENYAN_RESPONSE_TEAMS[0];
 
-    setDispatchOfficer(report.assignedOfficer || matchedTeam.leadOfficer || 'Field Desk Officer');
-    setDispatchOfficerEmail(report.assignedOfficerEmail || matchedTeam.email || 'dispatch@sema.go.ke');
+    setDispatchOfficer(activeReport.assignedOfficer || matchedTeam.leadOfficer || 'Field Desk Officer');
+    setDispatchOfficerEmail(activeReport.assignedOfficerEmail || matchedTeam.email || 'dispatch@sema.go.ke');
     setSendAutomatedEmail(true);
     setShowEmailPreview(false);
-    setDispatchPriority(report.priority || report.aiClassification?.urgency || 'Medium');
-    setDispatchStatus(report.status === 'Received' ? 'Assigned' : report.status);
-    setDispatchNotes(report.adminNotes || '');
+    setDispatchPriority(activeReport.priority || activeReport.aiClassification?.urgency || 'Medium');
+    setDispatchStatus(activeReport.status === 'Received' ? 'Assigned' : activeReport.status);
+    setDispatchNotes(activeReport.adminNotes || '');
   };
 
-  // Change team in modal
   const handleTeamChange = (teamName: string) => {
     setDispatchTeam(teamName);
     const matched = KENYAN_RESPONSE_TEAMS.find((t) => t.name === teamName);
@@ -1213,7 +1449,6 @@ Automated alert dispatched by Safaricom SEMA Intelligent NOC Operations.
     }
   };
 
-  // Save manual assignment with automated officer email alert
   const handleSaveDispatch = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!inspectingReport) return;
@@ -1286,91 +1521,6 @@ Automated alert dispatched by Safaricom SEMA Intelligent NOC Operations.
     }
   };
 
-  // Single AI Auto-Assign (with automated email dispatch)
-  const handleSingleAutoAssign = async (report: SubmissionRecord) => {
-    setClassifyingId(report.id);
-    setAutoAssignSuccessMessage(null);
-    setEmailSuccessMessage(null);
-
-    let classification: AIClassification = report.aiClassification || {
-      category: report.category || 'Civic & Public Services',
-      urgency: 'Medium',
-      recommendedTeam: KENYAN_RESPONSE_TEAMS[0].name,
-      rationale: 'Auto-assigned by SEMA dispatch engine',
-      estimatedSLA: '24 hours',
-    };
-
-    try {
-      const response = await fetch(`/api/submissions/${report.id}/ai-classify`, {
-        method: 'POST',
-      });
-      if (response.ok) {
-        const data = await response.json();
-        if (data.classification) {
-          classification = data.classification;
-        }
-      }
-    } catch {
-      // fallback classification exists
-    }
-
-    const matchedTeam =
-      KENYAN_RESPONSE_TEAMS.find((t) => t.name === classification.recommendedTeam) ||
-      KENYAN_RESPONSE_TEAMS[0];
-
-    const emailContent = generateClientEmailAlert(
-      report,
-      matchedTeam.leadOfficer,
-      matchedTeam.email,
-      matchedTeam.name,
-      classification.urgency,
-      `AI Auto-assigned: ${classification.rationale}`
-    );
-
-    const updated: SubmissionRecord = {
-      ...report,
-      category: classification.category,
-      priority: classification.urgency,
-      assignedTeam: classification.recommendedTeam,
-      assignedOfficer: matchedTeam.leadOfficer,
-      assignedOfficerEmail: matchedTeam.email,
-      status: 'Assigned',
-      aiClassification: classification,
-      adminNotes: `AI Auto-assigned: ${classification.rationale} (Target SLA: ${classification.estimatedSLA})`,
-      emailAlertSent: true,
-      emailAlertRecipient: matchedTeam.email,
-      emailAlertSentAt: new Date().toISOString(),
-      emailAlertSubject: emailContent.subject,
-      emailAlertBody: emailContent.body,
-    };
-
-    // Save
-    try {
-      await fetch(`/api/submissions/${report.id}/assign`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          assignedTeam: updated.assignedTeam,
-          assignedOfficer: updated.assignedOfficer,
-          assignedOfficerEmail: updated.assignedOfficerEmail,
-          priority: updated.priority,
-          status: updated.status,
-          adminNotes: updated.adminNotes,
-          sendEmailAlert: true,
-        }),
-      });
-    } catch {
-      // ignore
-    }
-
-    onUpdateSubmission(updated);
-    setClassifyingId(null);
-    setEmailSuccessMessage(
-      `AI Auto-assigned ${report.referenceCode} to ${matchedTeam.name} and dispatched email alert to ${matchedTeam.leadOfficer} (${matchedTeam.email}).`
-    );
-  };
-
-  // Send or resend an email alert directly from report row
   const handleSendEmailAlertForReport = async (report: SubmissionRecord) => {
     setSendingEmailForId(report.id);
     const matchedTeam =
@@ -1414,7 +1564,6 @@ Automated alert dispatched by Safaricom SEMA Intelligent NOC Operations.
     );
   };
 
-  // Batch Auto-Assign All Unassigned with AI (Sends Email Alerts to Officers)
   const handleBatchAutoAssignAll = async () => {
     setIsAutoAssigningAll(true);
     setAutoAssignSuccessMessage(null);
@@ -1441,7 +1590,7 @@ Automated alert dispatched by Safaricom SEMA Intelligent NOC Operations.
       // ignore
     }
 
-    // Client-side batch fallback (for GitHub Pages or offline)
+    // Client-side batch fallback
     const unassignedList = submissions.filter(
       (s) => s.status === 'Received' || !s.assignedTeam
     );
@@ -1517,33 +1666,11 @@ Automated alert dispatched by Safaricom SEMA Intelligent NOC Operations.
     });
 
     setAutoAssignSuccessMessage(
-      `AI successfully analyzed, categorized, and auto-assigned ${assignedCount} citizen reports, and dispatched ${assignedCount} automated email alerts to officers.`
+      `Successfully analyzed, categorized, and auto-assigned ${assignedCount} customer reports, and dispatched ${assignedCount} automated email alerts.`
     );
     setIsAutoAssigningAll(false);
   };
 
-  // Quick inline status change
-  const handleQuickStatusChange = async (report: SubmissionRecord, newStatus: ReportStatus) => {
-    const updated: SubmissionRecord = {
-      ...report,
-      status: newStatus,
-      resolvedAt: newStatus === 'Resolved' ? new Date().toISOString() : report.resolvedAt,
-    };
-
-    onUpdateSubmission(updated);
-
-    try {
-      await fetch(`/api/submissions/${report.id}/status`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ status: newStatus }),
-      });
-    } catch {
-      // ignore
-    }
-  };
-
-  // Export current submissions table as CSV file
   const handleExportCSV = () => {
     const listToExport = filteredSubmissions.length > 0 ? filteredSubmissions : submissions;
     if (listToExport.length === 0) return;
@@ -1559,11 +1686,11 @@ Automated alert dispatched by Safaricom SEMA Intelligent NOC Operations.
       'Lead Officer',
       'Language',
       'Capture Method',
-      'Citizen Report Text',
+      'Customer Report Text',
       'English Translation',
-      'Citizen Contact',
+      'Customer Contact',
       'Target SLA',
-      'AI Routing Rationale',
+      'Routing Rationale',
       'Admin Notes',
       'Resolved At',
     ];
@@ -1600,7 +1727,7 @@ Automated alert dispatched by Safaricom SEMA Intelligent NOC Operations.
     const link = document.createElement('a');
     link.href = url;
     const dateStr = new Date().toISOString().slice(0, 10);
-    link.download = `SEMA_Citizen_Reports_Export_${dateStr}.csv`;
+    link.download = `Safaricom_SEMA_Incident_Export_${dateStr}.csv`;
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
@@ -1608,288 +1735,320 @@ Automated alert dispatched by Safaricom SEMA Intelligent NOC Operations.
     setExportSuccessMessage(`Successfully exported ${listToExport.length} reports to CSV (${link.download})`);
   };
 
+  // Navigation Items
+  interface NavItem {
+    id: AdminPage;
+    label: string;
+    icon: React.ComponentType<{ className?: string }>;
+    badge?: string | number;
+  }
+
+  const navItems: NavItem[] = [
+    { id: 'overview', label: 'Overview', icon: LayoutDashboard },
+    { id: 'incidents', label: 'Incidents', icon: Inbox, badge: metrics.unassigned > 0 ? metrics.unassigned : undefined },
+    { id: 'channels', label: 'Channel feeds', icon: Radio },
+    { id: 'clusters', label: 'Root cause & clusters', icon: Zap, badge: '5' },
+    { id: 'teams', label: 'Response teams', icon: Users, badge: '7' },
+    { id: 'analytics', label: 'Analytics & AI insights', icon: BarChart3 },
+    { id: 'alerts', label: 'Alerts', icon: Bell, badge: metrics.emailAlertsSent > 0 ? metrics.emailAlertsSent : undefined },
+  ];
+
+  const getPageTitle = (page: AdminPage) => {
+    switch (page) {
+      case 'overview':
+        return 'Operations Overview';
+      case 'incidents':
+        return 'Incident Resolution Queue';
+      case 'channels':
+        return 'Channel Feeds & Aggregation';
+      case 'clusters':
+        return 'Root Cause & Issue Clusters';
+      case 'teams':
+        return 'Network & Incident Response Teams';
+      case 'analytics':
+        return 'Analytics & Incident Intelligence';
+      case 'alerts':
+        return 'Operational Alerts & Notifications';
+      default:
+        return 'Admin Dispatch Console';
+    }
+  };
+
   return (
-    <div className="min-h-screen bg-slate-50 text-slate-900 flex flex-col justify-between">
-      {/* Admin Top Bar */}
-      <header className="w-full bg-white border-b border-slate-200 sticky top-0 z-30">
-        <div className="max-w-[1440px] mx-auto px-6 py-3.5 flex items-center justify-between gap-6">
-          <div className="flex items-center gap-4">
+    <div className="h-screen max-h-screen overflow-hidden bg-slate-50 text-slate-900 flex relative">
+      {/* Floating Exit Button for Focus Mode */}
+      {isFocusMode && (
+        <button
+          type="button"
+          onClick={() => setIsFocusMode(false)}
+          className="fixed top-3 right-4 z-50 flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-slate-700 bg-white/95 hover:bg-white border border-slate-300 rounded-full shadow-lg backdrop-blur-xs transition-all cursor-pointer hover:shadow-xl"
+          title="Exit Focus Mode (Esc)"
+        >
+          <Minimize2 className="w-3.5 h-3.5 text-slate-500" />
+          <span>Exit Focus (Esc)</span>
+        </button>
+      )}
+
+      {/* 1. Left Sidebar (Fixed to left, stays fixed, never scrolls with page) */}
+      {!isFocusMode && (
+        <aside
+          className={`fixed inset-y-0 left-0 z-40 bg-[#004d3d] text-white flex flex-col justify-between shrink-0 h-full overflow-y-auto transition-all duration-200 ease-in-out md:relative md:translate-x-0 ${
+            isMobileMenuOpen ? 'translate-x-0' : '-translate-x-full'
+          } ${isSidebarCollapsed ? 'w-16' : 'w-64'}`}
+        >
+          <div>
+            {/* Brand Header */}
+            <div className={`border-b border-emerald-900/60 flex items-center ${isSidebarCollapsed ? 'p-3.5 justify-center flex-col gap-2' : 'p-4 justify-between'}`}>
+              <div className="flex items-center gap-2.5 min-w-0">
+                <span
+                  className="w-8 h-8 rounded-xl bg-emerald-500/20 border border-emerald-400/40 flex items-center justify-center text-emerald-300 font-bold text-sm shadow-xs shrink-0"
+                  title="SEMA Operations Console"
+                >
+                  S
+                </span>
+                {!isSidebarCollapsed && (
+                  <div className="truncate min-w-0">
+                    <h1 className="text-xs font-bold tracking-tight text-white flex items-center gap-1.5 truncate">
+                      <span>SEMA Console</span>
+                      <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse shrink-0" />
+                    </h1>
+                    <p className="text-[10px] text-emerald-200/80 font-medium truncate">Safaricom Operations</p>
+                  </div>
+                )}
+              </div>
+
+              {/* Sidebar Collapse Toggle Button (Desktop) */}
+              <button
+                type="button"
+                onClick={toggleSidebar}
+                className="hidden md:flex p-1 text-emerald-300 hover:text-white hover:bg-emerald-900/60 rounded-lg transition-colors cursor-pointer"
+                title={isSidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+                aria-label={isSidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+              >
+                {isSidebarCollapsed ? <ChevronRight className="w-4 h-4" /> : <ChevronLeft className="w-4 h-4" />}
+              </button>
+
+              {/* Mobile close button */}
+              <button
+                type="button"
+                onClick={() => setIsMobileMenuOpen(false)}
+                className="p-1 text-emerald-300 hover:text-white md:hidden cursor-pointer"
+                aria-label="Close menu"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Nav List */}
+            <nav className={`space-y-1 ${isSidebarCollapsed ? 'p-2' : 'p-3'}`}>
+              {navItems.map((item) => {
+                const Icon = item.icon;
+                const isActive = currentPage === item.id;
+                return (
+                  <button
+                    key={item.id}
+                    type="button"
+                    onClick={() => navigateTo(item.id as AdminPage)}
+                    title={isSidebarCollapsed ? `${item.label}${item.badge ? ` (${item.badge})` : ''}` : undefined}
+                    className={`w-full flex items-center rounded-xl text-xs transition-all cursor-pointer relative min-w-0 ${
+                      isSidebarCollapsed ? 'justify-center p-2.5' : 'justify-between px-3 py-2.5'
+                    } ${
+                      isActive
+                        ? 'bg-emerald-800 text-white font-bold shadow-xs border-l-4 border-emerald-400'
+                        : 'text-emerald-100/90 hover:bg-emerald-900/50 hover:text-white font-medium'
+                    }`}
+                  >
+                    <div className="flex items-center gap-3 min-w-0">
+                      <Icon className={`w-4 h-4 shrink-0 ${isActive ? 'text-emerald-300' : 'text-emerald-300/70'}`} />
+                      {!isSidebarCollapsed && <span className="truncate">{item.label}</span>}
+                    </div>
+
+                    {item.badge && (
+                      isSidebarCollapsed ? (
+                        <span className="w-2 h-2 rounded-full bg-emerald-400 shrink-0" />
+                      ) : (
+                        <span
+                          className={`text-[10px] font-bold px-1.5 py-0.2 rounded-full shrink-0 ${
+                            isActive
+                              ? 'bg-emerald-400 text-emerald-950 font-mono'
+                              : 'bg-emerald-900/80 text-emerald-200 font-mono'
+                          }`}
+                        >
+                          {item.badge}
+                        </span>
+                      )
+                    )}
+                  </button>
+                );
+              })}
+            </nav>
+          </div>
+
+          {/* Bottom Sidebar: Return to Customer Portal */}
+          <div className={`border-t border-emerald-900/60 ${isSidebarCollapsed ? 'p-2' : 'p-3.5 space-y-2'}`}>
             <button
               type="button"
               onClick={onSwitchToCitizenView}
-              className="inline-flex items-center gap-2 px-3 py-1.5 text-xs font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors cursor-pointer"
-            >
-              <ArrowLeft className="w-3.5 h-3.5" />
-              <span>Back to Customer Portal</span>
-            </button>
-            <div className="h-4 w-[1px] bg-slate-300 hidden sm:block" />
-            <div className="flex items-center gap-2">
-              <span className="w-2.5 h-2.5 rounded-full bg-emerald-600 animate-pulse" />
-              <span className="text-xs font-mono font-semibold uppercase tracking-wider text-slate-500">
-                Safaricom SEMA · Admin Resolution Console (All Safaricom Issues)
-              </span>
-            </div>
-          </div>
-
-          <div className="flex flex-wrap items-center gap-2.5 sm:gap-3">
-            <button
-              type="button"
-              onClick={() => setIsEmailLogsModalOpen(true)}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-emerald-900 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 rounded-lg transition-colors cursor-pointer"
-              title="View automated email alerts dispatched to Safaricom response leads"
-            >
-              <MailCheck className="w-3.5 h-3.5 text-emerald-700" />
-              <span>Officer Alerts ({metrics.emailAlertsSent})</span>
-            </button>
-
-            <button
-              type="button"
-              onClick={handleToggleSyncFeeds}
-              className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg transition-colors cursor-pointer border shadow-2xs ${
-                isSyncingFeeds
-                  ? 'bg-amber-500 hover:bg-amber-600 text-white border-amber-600 animate-pulse'
-                  : 'bg-emerald-50 hover:bg-emerald-100 text-emerald-950 border-emerald-300'
+              title={isSidebarCollapsed ? 'Back to Customer Portal' : undefined}
+              className={`w-full flex items-center justify-center rounded-xl transition-colors cursor-pointer border border-white/10 shadow-2xs text-white bg-white/10 hover:bg-white/20 min-w-0 ${
+                isSidebarCollapsed ? 'p-2.5' : 'gap-2 px-3 py-2 text-xs font-semibold'
               }`}
-              title="Stream synthetic demo complaints across Zuri, One App, USSD, WhatsApp, Twitter etc. (one every 1-2s)"
             >
-              {isSyncingFeeds ? (
-                <>
-                  <Loader2 className="w-3.5 h-3.5 animate-spin text-white" />
-                  <span>Syncing Feeds ({syncProgress.current}/{syncProgress.total})...</span>
-                </>
-              ) : (
-                <>
-                  <Radio className="w-3.5 h-3.5 text-emerald-700" />
-                  <span>Sync channel feeds</span>
-                </>
-              )}
+              <ArrowLeft className="w-4 h-4 shrink-0" />
+              {!isSidebarCollapsed && <span className="truncate">Back to Customer Portal</span>}
             </button>
-
-            <button
-              type="button"
-              onClick={handleClearSyncedFeeds}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-rose-700 hover:text-rose-900 bg-rose-50 hover:bg-rose-100 border border-rose-200 rounded-lg transition-colors cursor-pointer shadow-2xs"
-              title="Clear all synced channel demo feeds from the queue"
-            >
-              <Trash2 className="w-3.5 h-3.5 text-rose-600" />
-              <span>Clear synced feeds{syncedFeedsCount > 0 ? ` (${syncedFeedsCount})` : ''}</span>
-            </button>
-
-            <button
-              type="button"
-              onClick={handleExportCSV}
-              disabled={filteredSubmissions.length === 0}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-700 hover:text-slate-900 bg-white border border-slate-200 hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed rounded-lg transition-colors cursor-pointer"
-              title="Export current submissions to CSV file"
-            >
-              <Download className="w-3.5 h-3.5 text-slate-500" />
-              <span className="hidden sm:inline">Export CSV</span>
-            </button>
-
-            <button
-              type="button"
-              onClick={() => onRefreshSubmissions()}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-600 hover:text-slate-900 bg-white border border-slate-200 rounded-lg transition-colors cursor-pointer"
-            >
-              <RefreshCw className="w-3.5 h-3.5" />
-              <span className="hidden sm:inline">Refresh Queue</span>
-            </button>
-
-            {/* The Marquee AI Auto-Assign All Button */}
-            <button
-              type="button"
-              onClick={handleBatchAutoAssignAll}
-              disabled={isAutoAssigningAll || metrics.unassigned === 0}
-              className="inline-flex items-center gap-2 px-4 py-2 text-xs font-bold text-white bg-emerald-700 hover:bg-emerald-800 disabled:opacity-50 disabled:cursor-not-allowed rounded-lg shadow-xs transition-colors cursor-pointer whitespace-nowrap shrink-0"
-            >
-              {isAutoAssigningAll ? (
-                <>
-                  <Loader2 className="w-4 h-4 animate-spin" />
-                  <span>AI Auto-Assigning Queue...</span>
-                </>
-              ) : (
-                <>
-                  <Sparkles className="w-4 h-4 text-emerald-200" />
-                  <span>
-                    Auto-Assign with AI ({metrics.unassigned} Unassigned)
-                  </span>
-                </>
-              )}
-            </button>
+            {!isSidebarCollapsed && (
+              <div className="text-center">
+                <span className="text-[10px] text-emerald-300/60 font-mono truncate block">SEMA v2.4 · Safaricom</span>
+              </div>
+            )}
           </div>
-        </div>
-      </header>
+        </aside>
+      )}
 
-      {/* Main Workspace Viewport */}
-      <main className="max-w-[1440px] w-full mx-auto px-6 py-8 space-y-8 flex-1">
-        {/* Banner Alert for Auto-Assign Success */}
-        {autoAssignSuccessMessage && (
-          <div
-            className="bg-emerald-50 border border-emerald-300 rounded-xl p-4 flex items-start justify-between gap-4 text-xs text-emerald-950"
-            role="alert"
-          >
-            <div className="flex items-center gap-2.5">
-              <CheckCircle2 className="w-4 h-4 text-emerald-700 shrink-0" />
-              <span className="font-medium">{autoAssignSuccessMessage}</span>
-            </div>
-            <button
-              type="button"
-              onClick={() => setAutoAssignSuccessMessage(null)}
-              className="text-emerald-700 hover:text-emerald-950 font-bold"
-            >
-              Dismiss
-            </button>
-          </div>
-        )}
+      {/* Mobile Backdrop */}
+      {isMobileMenuOpen && (
+        <div
+          className="fixed inset-0 bg-slate-950/60 backdrop-blur-xs z-30 md:hidden"
+          onClick={() => setIsMobileMenuOpen(false)}
+        />
+      )}
 
-        {/* Banner Alert for Automated Email Alert Success */}
-        {emailSuccessMessage && (
-          <div
-            className="bg-sky-50 border border-sky-300 rounded-xl p-4 flex items-start justify-between gap-4 text-xs text-sky-950 animate-in fade-in"
-            role="alert"
-          >
-            <div className="flex items-center gap-2.5">
-              <MailCheck className="w-4 h-4 text-sky-700 shrink-0" />
-              <span className="font-medium">{emailSuccessMessage}</span>
-            </div>
-            <button
-              type="button"
-              onClick={() => setEmailSuccessMessage(null)}
-              className="text-sky-700 hover:text-sky-950 font-bold cursor-pointer"
-            >
-              Dismiss
-            </button>
-          </div>
-        )}
+      {/* 2. Main Right Area: Top Bar + Page Viewport (Only area that scrolls) */}
+      <div className="flex-1 flex flex-col min-w-0 h-full overflow-y-auto">
+        {/* Top Bar (Sticky at top of content area) */}
+        {!isFocusMode && (
+          <header className="sticky top-0 z-20 shrink-0 bg-white border-b border-slate-200 px-4 sm:px-6 py-2.5 flex items-center justify-between gap-3 min-w-0">
+            {/* Left: Page Title on ONE line only */}
+            <div className="flex items-center gap-2.5 min-w-0 flex-1 sm:flex-initial">
+              <button
+                type="button"
+                onClick={() => setIsMobileMenuOpen(true)}
+                className="p-1.5 text-slate-700 hover:text-slate-900 hover:bg-slate-100 rounded-lg md:hidden shrink-0 cursor-pointer"
+                aria-label="Open navigation menu"
+              >
+                <Menu className="w-5 h-5" />
+              </button>
 
-        {/* Banner Alert for CSV Export Success */}
-        {exportSuccessMessage && (
-          <div
-            className="bg-emerald-50 border border-emerald-300 rounded-xl p-4 flex items-start justify-between gap-4 text-xs text-emerald-950 animate-in fade-in"
-            role="alert"
-          >
-            <div className="flex items-center gap-2.5">
-              <CheckCircle2 className="w-4 h-4 text-emerald-700 shrink-0" />
-              <span className="font-medium">{exportSuccessMessage}</span>
-            </div>
-            <button
-              type="button"
-              onClick={() => setExportSuccessMessage(null)}
-              className="text-emerald-700 hover:text-emerald-950 font-bold cursor-pointer"
-            >
-              Dismiss
-            </button>
-          </div>
-        )}
-
-        {/* 5-KPI Operations Strip */}
-        <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
-          <div className="bg-white border border-slate-200 rounded-xl p-4 space-y-1">
-            <span className="text-xs font-medium text-slate-500">Total Customer Incidents</span>
-            <p className="text-2xl font-bold font-mono tabular-nums text-slate-900">
-              {metrics.total}
-            </p>
-            <p className="text-[11px] text-slate-400">Captured in EN / SW / Sheng</p>
-          </div>
-
-          <div className="bg-white border border-amber-200 bg-amber-50/20 rounded-xl p-4 space-y-1">
-            <span className="text-xs font-semibold text-amber-900">Unassigned Queue</span>
-            <p className="text-2xl font-bold font-mono tabular-nums text-amber-700">
-              {metrics.unassigned}
-            </p>
-            <p className="text-[11px] text-amber-800/80">Pending team dispatch</p>
-          </div>
-
-          <div className="bg-white border border-slate-200 rounded-xl p-4 space-y-1">
-            <span className="text-xs font-medium text-slate-500">In Progress / Dispatched</span>
-            <p className="text-2xl font-bold font-mono tabular-nums text-emerald-700">
-              {metrics.inProgress}
-            </p>
-            <p className="text-[11px] text-slate-400">Safaricom NOC &amp; field units operating</p>
-          </div>
-
-          <div className="bg-white border border-slate-200 rounded-xl p-4 space-y-1">
-            <span className="text-xs font-medium text-slate-500">Urgent Escalations</span>
-            <p className="text-2xl font-bold font-mono tabular-nums text-red-600">
-              {metrics.urgentCount}
-            </p>
-            <p className="text-[11px] text-red-500">Critical fibre / M-PESA urgency</p>
-          </div>
-
-          <button
-            type="button"
-            onClick={() => setIsEmailLogsModalOpen(true)}
-            className="bg-white border border-emerald-300 bg-emerald-50/20 hover:bg-emerald-50/50 transition-colors rounded-xl p-4 space-y-1 text-left cursor-pointer group"
-          >
-            <div className="flex items-center justify-between">
-              <span className="text-xs font-semibold text-emerald-950 flex items-center gap-1">
-                <MailCheck className="w-3.5 h-3.5 text-emerald-700" />
-                <span>Officer Alerts</span>
-              </span>
-              <span className="text-[10px] text-emerald-700 font-bold group-hover:underline">Logs &rarr;</span>
-            </div>
-            <p className="text-2xl font-bold font-mono tabular-nums text-emerald-800">
-              {metrics.emailAlertsSent}
-            </p>
-            <p className="text-[11px] text-emerald-700/80">Automated email notices</p>
-          </button>
-        </div>
-
-        {/* Teams Operational Load Strip */}
-        <section className="bg-white border border-slate-200 rounded-xl p-5 space-y-3">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2">
-              <Building2 className="w-4 h-4 text-emerald-800" />
-              <h2 className="text-sm font-bold text-slate-900">
-                Active Safaricom PLC Incident &amp; Network Response Teams
+              <h2 className="text-sm sm:text-base font-bold text-slate-900 truncate">
+                {getPageTitle(currentPage)}
               </h2>
             </div>
-            <span className="text-xs text-slate-500">
-              7 Specialized Units Connected · Real-time auto-assignment targets
-            </span>
-          </div>
 
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
-            {KENYAN_RESPONSE_TEAMS.map((team) => {
-              const teamActiveAssigned = submissions.filter(
-                (s) => s.assignedTeam === team.name
-              ).length;
-
-              return (
-                <div
-                  key={team.id}
-                  className="border border-slate-200/90 rounded-lg p-3 space-y-2 hover:border-emerald-600 transition-colors bg-slate-50/50"
-                >
-                  <div className="flex items-start justify-between gap-2">
-                    <p className="text-xs font-bold text-slate-900 leading-snug">
-                      {team.name}
-                    </p>
-                    <span className="text-[10px] font-mono px-1.5 py-0.5 bg-slate-200 text-slate-700 rounded font-medium shrink-0">
-                      {team.shortCode}
-                    </span>
-                  </div>
-                  <div className="text-[11px] text-slate-500 space-y-0.5">
-                    <p className="font-medium text-slate-700">Lead: {team.leadOfficer}</p>
-                    <p className="flex items-center gap-1 font-mono">
-                      <Phone className="w-3 h-3 text-slate-400" />
-                      <span>{team.phone}</span>
-                    </p>
-                  </div>
-                  <div className="pt-1.5 border-t border-slate-200 flex items-center justify-between text-[11px]">
-                    <span className="text-slate-500">Active Queue:</span>
-                    <span className="font-mono font-bold text-emerald-900 tabular-nums">
-                      {teamActiveAssigned} cases
-                    </span>
-                  </div>
+            {/* Right: Feed sync indicator, search, focus, bell, refresh */}
+            <div className="flex items-center gap-2 shrink-0 min-w-0">
+              {/* Non-blocking live feed ingestion indicator */}
+              {isSyncingFeeds && (
+                <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-emerald-50 text-emerald-800 border border-emerald-200 shrink-0 shadow-2xs animate-in fade-in">
+                  <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse shrink-0" />
+                  <span className="truncate whitespace-nowrap">
+                    Receiving feeds {syncProgress.current}/{syncProgress.total}
+                  </span>
                 </div>
-              );
-            })}
-          </div>
-        </section>
+              )}
 
-        {/* Inflow Stream Live Notification Toast */}
+              {/* Desktop Fixed Width Search (Responsive width, hidden below lg) */}
+              <div className="relative hidden lg:block w-48 xl:w-[280px]">
+                <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                <input
+                  type="text"
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  placeholder="Search reference, area, team..."
+                  className="w-full pl-8 pr-7 py-1.5 text-xs bg-slate-50 border border-slate-200 rounded-lg text-slate-800 focus:outline-none focus:border-emerald-600 transition-colors"
+                />
+                {searchQuery && (
+                  <button
+                    type="button"
+                    onClick={() => setSearchQuery('')}
+                    className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 cursor-pointer"
+                  >
+                    <X className="w-3 h-3" />
+                  </button>
+                )}
+              </div>
+
+              {/* Mobile Collapsible Search Icon */}
+              <div className="relative md:hidden">
+                <button
+                  type="button"
+                  onClick={() => setIsMobileSearchOpen(!isMobileSearchOpen)}
+                  className={`p-1.5 rounded-lg border transition-colors cursor-pointer ${
+                    isMobileSearchOpen || searchQuery
+                      ? 'bg-emerald-50 text-emerald-800 border-emerald-300'
+                      : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100 border-slate-200'
+                  }`}
+                  title="Search"
+                >
+                  <Search className="w-4 h-4" />
+                </button>
+                {isMobileSearchOpen && (
+                  <div className="absolute right-0 top-full mt-2 w-72 bg-white rounded-xl shadow-xl border border-slate-200 p-2 z-30 animate-in fade-in zoom-in-95">
+                    <div className="relative">
+                      <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                      <input
+                        autoFocus
+                        type="text"
+                        value={searchQuery}
+                        onChange={(e) => setSearchQuery(e.target.value)}
+                        placeholder="Search queue..."
+                        className="w-full pl-8 pr-7 py-1.5 text-xs bg-slate-50 border border-slate-200 rounded-lg text-slate-800 focus:outline-none focus:border-emerald-600"
+                      />
+                      {searchQuery && (
+                        <button
+                          type="button"
+                          onClick={() => setSearchQuery('')}
+                          className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
+                        >
+                          <X className="w-3 h-3" />
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* Focus Mode Button */}
+              <button
+                type="button"
+                onClick={() => setIsFocusMode(true)}
+                className="p-1.5 text-slate-600 hover:text-emerald-800 hover:bg-slate-100 rounded-lg transition-colors cursor-pointer border border-slate-200"
+                title="Focus Mode (Expand to full screen)"
+              >
+                <Maximize2 className="w-4 h-4" />
+              </button>
+
+              {/* Alerts Bell */}
+              <button
+                type="button"
+                onClick={() => navigateTo('alerts')}
+                className="relative p-1.5 text-slate-600 hover:text-emerald-800 hover:bg-slate-100 rounded-lg transition-colors cursor-pointer border border-slate-200"
+                title="View Alerts & Officer Notices"
+              >
+                <Bell className="w-4 h-4" />
+                {metrics.emailAlertsSent > 0 && (
+                  <span className="absolute -top-1 -right-1 w-4 h-4 rounded-full bg-emerald-600 text-white font-bold font-mono text-[9px] flex items-center justify-center ring-2 ring-white">
+                    {metrics.emailAlertsSent}
+                  </span>
+                )}
+              </button>
+
+              {/* Refresh Button */}
+              <button
+                type="button"
+                onClick={() => onRefreshSubmissions()}
+                className="p-1.5 text-slate-600 hover:text-slate-900 hover:bg-slate-100 rounded-lg border border-slate-200 transition-colors cursor-pointer"
+                title="Refresh queue"
+              >
+                <RefreshCw className="w-4 h-4" />
+              </button>
+            </div>
+          </header>
+        )}
+
+        {/* Global Toast for Inflow / Actions */}
         {inflowToast && (
-          <div className="bg-emerald-900 text-white px-4 py-2.5 rounded-xl text-xs font-semibold flex items-center justify-between shadow-lg animate-fadeIn border border-emerald-700">
+          <div className="mx-6 mt-4 bg-emerald-900 text-white px-4 py-2.5 rounded-xl text-xs font-semibold flex items-center justify-between shadow-lg border border-emerald-700 animate-in fade-in">
             <span className="flex items-center gap-2">
               <Radio className="w-4 h-4 text-emerald-300 animate-pulse" />
               <span>{inflowToast}</span>
@@ -1904,844 +2063,1886 @@ Automated alert dispatched by Safaricom SEMA Intelligent NOC Operations.
           </div>
         )}
 
-        {/* New Multi-Channel & Incident Location Filter Dashboard */}
-        <MultiChannelFilterDashboard
-          totalCount={submissions.length}
-          activeTab={activeTab}
-          onSelectTab={(tab) => {
-            setActiveTab(tab);
-            if (tab === 'clusters') {
-              setIsClusteringModalOpen(true);
-            }
-          }}
-          priorityRanking={priorityRanking}
-          onTogglePriorityRanking={() => setPriorityRanking((prev) => !prev)}
-          onSimulateInflow={handleSimulateInflowStream}
-          isSimulating={isSimulatingInflow}
-          selectedChannel={selectedChannel}
-          onSelectChannel={(ch) =>
-            setSelectedChannel((prev) => (prev === ch && ch !== 'All Channels' ? 'All Channels' : ch))
-          }
-          channelCounts={channelCounts}
-          selectedCategory={selectedCategory}
-          onSelectCategory={(cat) =>
-            setSelectedCategory((prev) => (prev === cat && cat !== 'All Categories' ? 'All Categories' : cat))
-          }
-          categoryCounts={categoryCounts}
-          selectedLocation={selectedLocation}
-          onSelectLocation={setSelectedLocation}
-          locationCounts={locationCounts}
-          onResetLocation={() => setSelectedLocation('All Locations')}
-        />
-
-        {/* Submissions Incident Table */}
-        <section className="bg-white border border-slate-200 rounded-xl overflow-hidden shadow-2xs">
-          <div className="px-5 py-3.5 border-b border-slate-200 flex flex-wrap items-center justify-between gap-3">
-            <div>
-              <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2">
-                <span>Citizen Incidents Queue</span>
-                <span className="text-xs font-mono font-normal text-slate-500 bg-slate-100 px-2 py-0.5 rounded-full">
-                  {filteredSubmissions.length} of {submissions.length}
-                </span>
-              </h3>
-              <p className="text-2xs text-slate-500 mt-0.5">
-                Live updates from voice &amp; text channels
-              </p>
-            </div>
-            <div className="flex flex-wrap items-center gap-2">
+        {/* Notifications / Success Messages */}
+        <div className="px-4 sm:px-6 pt-3 space-y-2">
+          {autoAssignSuccessMessage && (
+            <div
+              className="bg-emerald-50 border border-emerald-300 rounded-xl p-3 flex items-start justify-between gap-4 text-xs text-emerald-950 animate-in fade-in"
+              role="alert"
+            >
+              <div className="flex items-center gap-2">
+                <CheckCircle2 className="w-4 h-4 text-emerald-700 shrink-0" />
+                <span className="font-medium">{autoAssignSuccessMessage}</span>
+              </div>
               <button
                 type="button"
-                onClick={handleToggleSyncFeeds}
-                className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg transition-colors cursor-pointer border shadow-2xs ${
-                  isSyncingFeeds
-                    ? 'bg-amber-500 hover:bg-amber-600 text-white border-amber-600 animate-pulse'
-                    : 'bg-emerald-50 hover:bg-emerald-100 text-emerald-950 border-emerald-300'
-                }`}
-                title="Stream synthetic demo complaints across Zuri, One App, USSD, WhatsApp, Twitter etc. (one every 1-2s)"
+                onClick={() => setAutoAssignSuccessMessage(null)}
+                className="text-emerald-700 hover:text-emerald-950 font-bold cursor-pointer"
               >
-                {isSyncingFeeds ? (
-                  <>
-                    <Loader2 className="w-3.5 h-3.5 animate-spin text-white" />
-                    <span>Syncing Feeds ({syncProgress.current}/{syncProgress.total})...</span>
-                  </>
-                ) : (
-                  <>
-                    <Radio className="w-3.5 h-3.5 text-emerald-700" />
-                    <span>Sync channel feeds</span>
-                  </>
-                )}
-              </button>
-
-              <button
-                type="button"
-                onClick={handleClearSyncedFeeds}
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-rose-700 hover:text-rose-900 bg-rose-50 hover:bg-rose-100 border border-rose-200 rounded-lg transition-colors cursor-pointer shadow-2xs"
-                title="Clear all synced channel demo feeds from the queue"
-              >
-                <Trash2 className="w-3.5 h-3.5 text-rose-600" />
-                <span>Clear synced feeds{syncedFeedsCount > 0 ? ` (${syncedFeedsCount})` : ''}</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={handleExportCSV}
-                disabled={filteredSubmissions.length === 0}
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-emerald-800 bg-emerald-50 hover:bg-emerald-100/80 border border-emerald-200 rounded-lg transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed shadow-2xs"
-                title="Export current table to CSV file for record-keeping"
-              >
-                <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-700" />
-                <span>Export Table to CSV ({filteredSubmissions.length})</span>
+                Dismiss
               </button>
             </div>
-          </div>
+          )}
 
-          {/* Visual Status Legend Bar */}
-          <div className="bg-slate-50/90 border-b border-slate-200 px-5 py-2.5 flex flex-wrap items-center justify-between gap-3 text-xs">
-            <div className="flex flex-wrap items-center gap-2.5 sm:gap-4">
-              <span className="text-2xs font-bold uppercase tracking-wider text-slate-500 flex items-center gap-1.5 shrink-0">
-                <SlidersHorizontal className="w-3 h-3 text-slate-400" />
-                <span>Lifecycle Stages:</span>
-              </span>
+          {emailSuccessMessage && (
+            <div
+              className="bg-sky-50 border border-sky-300 rounded-xl p-3 flex items-start justify-between gap-4 text-xs text-sky-950 animate-in fade-in"
+              role="alert"
+            >
+              <div className="flex items-center gap-2">
+                <MailCheck className="w-4 h-4 text-sky-700 shrink-0" />
+                <span className="font-medium">{emailSuccessMessage}</span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setEmailSuccessMessage(null)}
+                className="text-sky-700 hover:text-sky-950 font-bold cursor-pointer"
+              >
+                Dismiss
+              </button>
+            </div>
+          )}
 
-              {/* Status items with color-coded dots, descriptions and interactive filter toggle */}
-              <div className="flex flex-wrap items-center gap-1.5 sm:gap-2">
-                {STATUS_LEGEND_CONFIG.map((item) => {
-                  const isSelected = selectedStatus === item.status;
-                  const count = statusCounts[item.status] || 0;
+          {exportSuccessMessage && (
+            <div
+              className="bg-emerald-50 border border-emerald-300 rounded-xl p-3 flex items-start justify-between gap-4 text-xs text-emerald-950 animate-in fade-in"
+              role="alert"
+            >
+              <div className="flex items-center gap-2">
+                <CheckCircle2 className="w-4 h-4 text-emerald-700 shrink-0" />
+                <span className="font-medium">{exportSuccessMessage}</span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setExportSuccessMessage(null)}
+                className="text-emerald-700 hover:text-emerald-950 font-bold cursor-pointer"
+              >
+                Dismiss
+              </button>
+            </div>
+          )}
+        </div>
 
-                  return (
+        {/* 3. Page Body Switcher */}
+        <main className={`p-4 sm:p-6 space-y-5 flex-1 ${isFocusMode ? 'max-w-7xl mx-auto w-full' : ''}`}>
+          {/* ================= PAGE 1: OVERVIEW ================= */}
+          {currentPage === 'overview' && (
+            <div className="space-y-5 animate-in fade-in duration-150">
+              {/* Auto-dispatch Status Bar */}
+              <div className="bg-white border border-slate-200 rounded-xl px-4 py-2.5 shadow-2xs flex flex-wrap items-center justify-between gap-3 min-w-0">
+                <div className="flex items-center gap-2.5 min-w-0">
+                  <div
+                    className={`w-2.5 h-2.5 rounded-full shrink-0 ${
+                      isAutoDispatchEnabled ? 'bg-emerald-500 animate-pulse' : 'bg-slate-400'
+                    }`}
+                  />
+                  <div className="truncate min-w-0">
+                    <span className="text-xs font-bold text-slate-900 block truncate">
+                      Automated Incident Dispatch Engine
+                    </span>
+                    <span className="text-2xs text-slate-500 truncate block">
+                      {isAutoDispatchEnabled
+                        ? 'Active — incoming tickets route automatically to specialized response teams and officers'
+                        : 'Paused — incoming tickets remain unassigned in Received queue for manual triage'}
+                    </span>
+                  </div>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={handleToggleAutoDispatch}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 border shadow-2xs shrink-0 ${
+                    isAutoDispatchEnabled
+                      ? 'bg-emerald-700 hover:bg-emerald-800 text-white border-emerald-800'
+                      : 'bg-slate-100 hover:bg-slate-200 text-slate-700 border-slate-300'
+                  }`}
+                  title="Toggle automatic routing for incoming incidents"
+                >
+                  <Zap className={`w-3.5 h-3.5 ${isAutoDispatchEnabled ? 'text-emerald-300' : 'text-slate-500'}`} />
+                  <span>Auto-dispatch: {isAutoDispatchEnabled ? 'ON' : 'OFF'}</span>
+                </button>
+              </div>
+
+              {/* 4 KPI Cards */}
+              <div className="grid grid-cols-2 lg:grid-cols-4 gap-3.5 min-w-0">
+                <div className="bg-white border border-slate-200 rounded-xl p-3.5 space-y-1 shadow-2xs min-w-0">
+                  <span className="text-xs font-medium text-slate-500 truncate block">Total Incidents</span>
+                  <p className="text-2xl font-bold font-mono tabular-nums text-slate-900 truncate">
+                    {metrics.total}
+                  </p>
+                  <p className="text-[11px] text-slate-400 truncate">Captured in EN / SW / Sheng</p>
+                </div>
+
+                <div className="bg-white border border-amber-200 bg-amber-50/20 rounded-xl p-3.5 space-y-1 shadow-2xs min-w-0">
+                  <span className="text-xs font-semibold text-amber-900 truncate block">Unassigned Queue</span>
+                  <p className="text-2xl font-bold font-mono tabular-nums text-amber-700 truncate">
+                    {metrics.unassigned}
+                  </p>
+                  <p className="text-[11px] text-amber-800/80 truncate">Pending team dispatch</p>
+                </div>
+
+                <div className="bg-white border border-slate-200 rounded-xl p-3.5 space-y-1 shadow-2xs min-w-0">
+                  <span className="text-xs font-medium text-slate-500 truncate block">In Progress / Dispatched</span>
+                  <p className="text-2xl font-bold font-mono tabular-nums text-emerald-700 truncate">
+                    {metrics.inProgress}
+                  </p>
+                  <p className="text-[11px] text-slate-400 truncate">Field units actively operating</p>
+                </div>
+
+                <div className="bg-white border border-red-200 bg-red-50/20 rounded-xl p-3.5 space-y-1 shadow-2xs min-w-0">
+                  <span className="text-xs font-semibold text-red-900 truncate block">Urgent Escalations</span>
+                  <p className="text-2xl font-bold font-mono tabular-nums text-red-600 truncate">
+                    {metrics.urgentCount}
+                  </p>
+                  <p className="text-[11px] text-red-500 truncate">Critical fibre / M-PESA urgency</p>
+                </div>
+              </div>
+
+              {/* Banner for Active Clusters */}
+              <div className="bg-gradient-to-r from-amber-500/15 via-amber-500/5 to-white border-2 border-amber-400 rounded-2xl p-4.5 shadow-xs flex flex-col md:flex-row md:items-center justify-between gap-4 min-w-0">
+                <div className="flex items-start gap-3 min-w-0">
+                  <span className="p-2 bg-amber-500 text-white rounded-xl shadow-xs mt-0.5 shrink-0">
+                    <Zap className="w-5 h-5 fill-current" />
+                  </span>
+                  <div className="min-w-0">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider bg-amber-500 text-white shrink-0">
+                        5 Active National Clusters
+                      </span>
+                      <span className="text-xs font-bold text-amber-950 truncate">
+                        Ruaka Hub (73 Impacted Complaints)
+                      </span>
+                    </div>
+                    <p className="text-xs text-slate-700 mt-1 max-w-2xl leading-relaxed break-words">
+                      Excavator severed the primary 96-core metro optical fiber backhaul along Limuru Road. Automated correlation aggregated reports across CRM, WhatsApp, and Social Media.
+                    </p>
+                  </div>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => navigateTo('clusters')}
+                  className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-bold text-white bg-emerald-700 hover:bg-emerald-800 rounded-xl transition-colors cursor-pointer shrink-0 self-start md:self-auto"
+                >
+                  <span>Inspect Clusters</span>
+                  <ArrowRight className="w-3.5 h-3.5" />
+                </button>
+              </div>
+
+              {/* Channel Mix Chart */}
+              <section className="bg-white border border-slate-200 rounded-xl p-4.5 shadow-2xs space-y-3.5">
+                <div className="flex items-center justify-between pb-2.5 border-b border-slate-100">
+                  <div className="flex items-center gap-2">
+                    <Radio className="w-4 h-4 text-emerald-700" />
+                    <h3 className="text-sm font-bold text-slate-900">
+                      Channel Mix &amp; Complaint Volume Breakdown
+                    </h3>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => navigateTo('channels')}
+                    className="text-xs font-semibold text-emerald-700 hover:text-emerald-900 underline flex items-center gap-1 cursor-pointer"
+                  >
+                    <span>View all channels</span>
+                    <ChevronRight className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+
+                <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-3">
+                  {CHANNELS.filter((ch) => ch !== 'All Channels').map((ch) => {
+                    const count = channelCounts[ch] || 0;
+                    const pct = metrics.total > 0 ? Math.round((count / metrics.total) * 100) : 0;
+                    return (
+                      <div
+                        key={ch}
+                        onClick={() => {
+                          setSelectedChannel(ch);
+                          navigateTo('incidents');
+                        }}
+                        className="p-3 rounded-lg border border-slate-200/80 hover:border-emerald-500 bg-slate-50/50 hover:bg-emerald-50/30 transition-all cursor-pointer space-y-1.5"
+                      >
+                        <div className="flex items-center justify-between">
+                          {renderChannelBadge(ch)}
+                          <span className="text-[10px] font-mono text-slate-400">{pct}%</span>
+                        </div>
+                        <p className="text-lg font-bold font-mono text-slate-900 tabular-nums">
+                          {count}
+                        </p>
+                        <div className="w-full bg-slate-200 h-1.5 rounded-full overflow-hidden">
+                          <div
+                            className="bg-emerald-600 h-full rounded-full"
+                            style={{ width: `${pct}%` }}
+                          />
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </section>
+
+              {/* 5 Latest Incidents */}
+              <section className="bg-white border border-slate-200 rounded-xl shadow-2xs overflow-hidden">
+                <div className="px-5 py-3 border-b border-slate-200 flex items-center justify-between">
+                  <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2">
+                    <span>Latest Reported Incidents</span>
+                    <span className="text-xs font-mono font-normal text-slate-500 bg-slate-100 px-2 py-0.5 rounded-full">
+                      5 Most Recent
+                    </span>
+                  </h3>
+
+                  <button
+                    type="button"
+                    onClick={() => navigateTo('incidents')}
+                    className="inline-flex items-center gap-1 text-xs font-bold text-emerald-800 hover:text-emerald-950 underline cursor-pointer"
+                  >
+                    <span>Open Full Queue ({submissions.length})</span>
+                    <ArrowRight className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+
+                <div className="divide-y divide-slate-100">
+                  {submissions.slice(0, 5).map((report) => (
+                    <div
+                      key={report.id}
+                      onClick={() => handleOpenInspect(report)}
+                      className="p-3.5 hover:bg-slate-50 transition-colors cursor-pointer flex flex-col md:flex-row md:items-center justify-between gap-3 text-xs"
+                    >
+                      <div className="space-y-1 flex-1 min-w-0">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="font-mono font-bold text-emerald-800">
+                            {report.referenceCode}
+                          </span>
+                          {renderChannelBadge(report.channel, report.captureMethod)}
+                          {report.needsReview && (
+                            <span className="inline-flex items-center gap-1 px-1.5 py-0.2 rounded text-[10px] font-bold bg-amber-100 text-amber-900 border border-amber-300 shrink-0">
+                              <AlertTriangle className="w-2.5 h-2.5 text-amber-700 shrink-0" />
+                              <span>Needs review</span>
+                            </span>
+                          )}
+                          <span className="text-slate-500 flex items-center gap-1">
+                            <MapPin className="w-3 h-3 text-slate-400 shrink-0" />
+                            <span className="truncate">{report.countyOrWard}</span>
+                          </span>
+                        </div>
+                        <p className="text-slate-800 font-medium line-clamp-1">
+                          &ldquo;{report.text}&rdquo;
+                        </p>
+                      </div>
+
+                      <div className="flex items-center gap-2.5 shrink-0">
+                        <span
+                          className={`px-2 py-0.5 rounded text-[10px] font-bold ${
+                            report.priority === 'Urgent'
+                              ? 'bg-red-100 text-red-800'
+                              : report.priority === 'High'
+                              ? 'bg-amber-100 text-amber-800'
+                              : 'bg-slate-100 text-slate-700'
+                          }`}
+                        >
+                          {report.priority || 'Medium'}
+                        </span>
+                        <span className="text-2xs font-semibold px-2 py-0.5 rounded-full bg-slate-100 text-slate-700">
+                          {report.status}
+                        </span>
+                        <button
+                          type="button"
+                          className="px-2.5 py-1 bg-emerald-50 text-emerald-800 hover:bg-emerald-100 font-semibold rounded-lg text-xs"
+                        >
+                          Inspect
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </section>
+            </div>
+          )}
+
+          {/* ================= PAGE 2: INCIDENTS ================= */}
+          {currentPage === 'incidents' && (
+            <div className="space-y-3.5 animate-in fade-in duration-150">
+              {/* COMPACT FILTER CONTAINER: Row 1 = Compact Horizontal Filters; Row 2 = Stage Chips */}
+              <div className="bg-white border border-slate-200 rounded-xl p-3 space-y-2.5 shadow-2xs">
+                {/* Row 1: Channel, Category, Location, Search, Priority, Reset, Export CSV */}
+                <div className="flex flex-wrap items-center gap-2">
+                  {/* Channel Dropdown */}
+                  <select
+                    value={selectedChannel}
+                    onChange={(e) => {
+                      setSelectedChannel(e.target.value);
+                      setVisibleCount(15);
+                    }}
+                    className="h-8 px-2.5 text-xs bg-slate-50 border border-slate-200 rounded-lg text-slate-800 font-medium focus:outline-none focus:border-emerald-600 cursor-pointer"
+                  >
+                    {CHANNELS.map((ch) => (
+                      <option key={ch} value={ch}>
+                        {ch} ({channelCounts[ch] || 0})
+                      </option>
+                    ))}
+                  </select>
+
+                  {/* Category Dropdown */}
+                  <select
+                    value={selectedCategory}
+                    onChange={(e) => {
+                      setSelectedCategory(e.target.value);
+                      setVisibleCount(15);
+                    }}
+                    className="h-8 px-2.5 text-xs bg-slate-50 border border-slate-200 rounded-lg text-slate-800 font-medium focus:outline-none focus:border-emerald-600 cursor-pointer"
+                  >
+                    {OPERATIONAL_CATEGORIES.map((cat) => (
+                      <option key={cat} value={cat}>
+                        {cat} ({categoryCounts[cat] || 0})
+                      </option>
+                    ))}
+                  </select>
+
+                  {/* Location Dropdown */}
+                  <select
+                    value={selectedLocation}
+                    onChange={(e) => {
+                      setSelectedLocation(e.target.value);
+                      setVisibleCount(15);
+                    }}
+                    className="h-8 px-2.5 text-xs bg-slate-50 border border-slate-200 rounded-lg text-slate-800 font-medium focus:outline-none focus:border-emerald-600 cursor-pointer"
+                  >
+                    {LOCATIONS.map((loc) => (
+                      <option key={loc} value={loc}>
+                        {loc} ({locationCounts[loc] || 0})
+                      </option>
+                    ))}
+                  </select>
+
+                  {/* Search box in filter bar */}
+                  <div className="relative min-w-[150px] sm:w-44">
+                    <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-1/2 -translate-y-1/2" />
+                    <input
+                      type="text"
+                      value={searchQuery}
+                      onChange={(e) => {
+                        setSearchQuery(e.target.value);
+                        setVisibleCount(15);
+                      }}
+                      placeholder="Search queue..."
+                      className="w-full h-8 pl-8 pr-6 text-xs bg-slate-50 border border-slate-200 rounded-lg text-slate-800 focus:outline-none focus:border-emerald-600"
+                    />
+                    {searchQuery && (
+                      <button
+                        type="button"
+                        onClick={() => setSearchQuery('')}
+                        className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 cursor-pointer"
+                      >
+                        <X className="w-3 h-3" />
+                      </button>
+                    )}
+                  </div>
+
+                  {/* Priority Ranking Toggle */}
+                  <button
+                    type="button"
+                    onClick={() => setPriorityRanking((prev) => !prev)}
+                    className={`h-8 px-2.5 text-xs font-semibold rounded-lg border transition-colors cursor-pointer flex items-center gap-1.5 ${
+                      priorityRanking
+                        ? 'bg-emerald-50 border-emerald-400 text-emerald-800'
+                        : 'bg-white border-slate-200 text-slate-600'
+                    }`}
+                    title="Toggle priority ranking (Urgent first vs timestamp order)"
+                  >
+                    <TrendingUp className="w-3.5 h-3.5 text-emerald-600" />
+                    <span>Priority: {priorityRanking ? 'ON' : 'OFF'}</span>
+                  </button>
+
+                  {/* Auto-Dispatch Toggle */}
+                  <button
+                    type="button"
+                    onClick={handleToggleAutoDispatch}
+                    className={`h-8 px-2.5 text-xs font-semibold rounded-lg border transition-colors cursor-pointer flex items-center gap-1.5 ${
+                      isAutoDispatchEnabled
+                        ? 'bg-emerald-50 border-emerald-400 text-emerald-800'
+                        : 'bg-white border-slate-200 text-slate-600'
+                    }`}
+                    title="Toggle automated ticket dispatch to response teams"
+                  >
+                    <Zap className={`w-3.5 h-3.5 ${isAutoDispatchEnabled ? 'text-emerald-600' : 'text-slate-400'}`} />
+                    <span>Auto-dispatch: {isAutoDispatchEnabled ? 'ON' : 'OFF'}</span>
+                  </button>
+
+                  {/* Reset Filters */}
+                  {(selectedChannel !== 'All Channels' ||
+                    selectedCategory !== 'All Categories' ||
+                    selectedLocation !== 'All Locations' ||
+                    selectedStatus !== 'All' ||
+                    searchQuery) && (
                     <button
-                      key={item.status}
                       type="button"
                       onClick={() => {
-                        setSelectedStatus((prev) => (prev === item.status ? 'All' : item.status));
+                        setSelectedChannel('All Channels');
+                        setSelectedCategory('All Categories');
+                        setSelectedLocation('All Locations');
+                        setSelectedStatus('All');
+                        setSearchQuery('');
+                        setVisibleCount(15);
                       }}
-                      className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-2xs transition-all cursor-pointer select-none border ${
-                        isSelected
-                          ? `${item.activeBg} ${item.badgeBorder} ${item.textColor} font-bold ring-2 ${item.ringColor} shadow-2xs`
-                          : 'bg-white hover:bg-slate-100/80 text-slate-700 border-slate-200/80 font-medium'
-                      }`}
-                      title={`${item.status}: ${item.description} (Click to filter queue)`}
+                      className="h-8 px-2 text-xs font-semibold text-emerald-700 hover:text-emerald-900 underline cursor-pointer"
                     >
-                      <span
-                        className={`w-2.5 h-2.5 rounded-full shrink-0 ${item.dotColor} ${
-                          item.status === 'In Progress' ? 'animate-pulse' : ''
-                        }`}
-                      />
-                      <span>{item.label}</span>
-                      <span
-                        className={`font-mono text-[10px] px-1 py-0.2 rounded font-semibold ${
-                          isSelected ? 'bg-white/80 text-slate-900' : 'bg-slate-100 text-slate-500'
-                        }`}
-                      >
-                        {count}
-                      </span>
+                      Reset
                     </button>
+                  )}
+
+                  {/* Export CSV (lives only here) */}
+                  <button
+                    type="button"
+                    onClick={handleExportCSV}
+                    disabled={filteredSubmissions.length === 0}
+                    className="h-8 px-3 text-xs font-semibold text-slate-700 hover:text-slate-900 bg-white border border-slate-200 hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed rounded-lg transition-colors cursor-pointer shadow-2xs flex items-center gap-1.5 ml-auto"
+                    title="Export current table to CSV file"
+                  >
+                    <Download className="w-3.5 h-3.5 text-slate-500" />
+                    <span>Export CSV</span>
+                  </button>
+                </div>
+
+                {/* Row 2: Lifecycle stage chips in ONE compact row below + Auto-Assign with AI */}
+                <div className="pt-2 border-t border-slate-100 flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <span className="text-2xs font-bold uppercase tracking-wider text-slate-400 mr-1 flex items-center gap-1">
+                      <SlidersHorizontal className="w-3 h-3 text-slate-400" />
+                      <span>Stage:</span>
+                    </span>
+                    {STATUS_LEGEND_CONFIG.map((item) => {
+                      const isSelected = selectedStatus === item.status;
+                      const count = statusCounts[item.status] || 0;
+                      return (
+                        <button
+                          key={item.status}
+                          type="button"
+                          onClick={() => {
+                            setSelectedStatus((prev) => (prev === item.status ? 'All' : item.status));
+                            setVisibleCount(15);
+                          }}
+                          className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-2xs transition-all cursor-pointer select-none border ${
+                            isSelected
+                              ? `${item.activeBg} ${item.badgeBorder} ${item.textColor} font-bold ring-2 ${item.ringColor}`
+                              : 'bg-white hover:bg-slate-50 text-slate-700 border-slate-200 font-medium'
+                          }`}
+                        >
+                          <span
+                            className={`w-1.5 h-1.5 rounded-full shrink-0 ${item.dotColor} ${
+                              item.status === 'In Progress' ? 'animate-pulse' : ''
+                            }`}
+                          />
+                          <span>{item.label}</span>
+                          <span className="font-mono text-[10px] text-slate-500 font-semibold">{count}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={handleBatchAutoAssignAll}
+                    disabled={isAutoAssigningAll || metrics.unassigned === 0}
+                    className="inline-flex items-center gap-1.5 px-3 py-1 text-xs font-bold text-white bg-emerald-700 hover:bg-emerald-800 disabled:opacity-50 disabled:cursor-not-allowed rounded-lg shadow-xs transition-colors cursor-pointer"
+                  >
+                    {isAutoAssigningAll ? (
+                      <>
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        <span>Auto-Assigning...</span>
+                      </>
+                    ) : (
+                      <>
+                        <Sparkles className="w-3.5 h-3.5 text-emerald-200" />
+                        <span>Auto-Assign with AI ({metrics.unassigned})</span>
+                      </>
+                    )}
+                  </button>
+                </div>
+              </div>
+
+              {/* Incidents Table (Clean compact rows, no horizontal scrolling at >=1024px, scrollable area, 15 rows initially) */}
+              <div className="bg-white border border-slate-200 rounded-xl overflow-hidden shadow-2xs">
+                <div className="px-4 py-2.5 border-b border-slate-200 flex items-center justify-between text-xs">
+                  <div className="flex items-center gap-2">
+                    <span className="font-bold text-slate-900">Incident Queue</span>
+                    <span className="font-mono text-slate-500 bg-slate-100 px-2 py-0.5 rounded-full">
+                      {Math.min(visibleCount, filteredSubmissions.length)} of {filteredSubmissions.length} shown
+                    </span>
+                  </div>
+                  <span className="text-slate-400 text-2xs hidden sm:inline">
+                    Click row to view AI steps, translation &amp; dispatch memo in detail panel
+                  </span>
+                </div>
+
+                {filteredSubmissions.length === 0 ? (
+                  <div className="p-12 text-center space-y-3">
+                    <Bot className="w-8 h-8 text-slate-300 mx-auto" />
+                    <p className="text-sm font-medium text-slate-700">No incident reports match your current filter.</p>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSearchQuery('');
+                        setSelectedStatus('All');
+                        setSelectedTeamFilter('All');
+                        setSelectedLanguageFilter('All');
+                        setSelectedChannel('All Channels');
+                        setSelectedCategory('All Categories');
+                        setSelectedLocation('All Locations');
+                        setVisibleCount(15);
+                      }}
+                      className="px-3.5 py-2 text-xs font-semibold text-emerald-800 bg-emerald-50 rounded-lg cursor-pointer"
+                    >
+                      Reset Filters
+                    </button>
+                  </div>
+                ) : (
+                  <div className="overflow-y-auto max-h-[580px]">
+                    <table className="w-full table-fixed text-left text-xs border-collapse">
+                      <thead className="sticky top-0 bg-slate-50 shadow-2xs z-10 border-b border-slate-200">
+                        <tr className="text-slate-500 font-semibold uppercase tracking-wider text-[11px]">
+                          <th className="py-2.5 px-3 w-[130px]">Ticket</th>
+                          <th className="py-2.5 px-3">Statement</th>
+                          <th className="py-2.5 px-3 w-[155px]">Category &amp; Priority</th>
+                          <th className="py-2.5 px-3 w-[110px]">Location</th>
+                          <th className="py-2.5 px-3 w-[130px]">Team</th>
+                          <th className="py-2.5 px-3 w-[95px]">Status</th>
+                          <th className="py-2.5 px-3 w-[75px] text-right">Actions</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100">
+                        {filteredSubmissions.slice(0, visibleCount).map((report) => {
+                          const isUrgent = report.priority === 'Urgent';
+                          const isUnassigned = !report.assignedTeam || report.status === 'Received';
+
+                          return (
+                            <tr
+                              key={report.id}
+                              onClick={() => handleOpenInspect(report)}
+                              className={`hover:bg-slate-50/80 transition-colors cursor-pointer border-l-4 ${
+                                isUrgent
+                                  ? 'border-l-red-500 bg-red-50/10'
+                                  : isUnassigned
+                                  ? 'border-l-amber-400'
+                                  : 'border-l-transparent'
+                              }`}
+                            >
+                              {/* 1. Ticket + Coloured Channel Badge with Icon */}
+                              <td className="py-2.5 px-3 align-middle">
+                                <div className="space-y-1">
+                                  <span className="font-mono font-bold text-emerald-800 block text-xs">
+                                    {report.referenceCode}
+                                  </span>
+                                  {renderChannelBadge(report.channel, report.captureMethod)}
+                                </div>
+                              </td>
+
+                              {/* 2. Statement (2-line clamp) */}
+                              <td className="py-2.5 px-3 align-middle">
+                                <p className="font-medium text-slate-800 leading-snug line-clamp-2">
+                                  &ldquo;{report.text}&rdquo;
+                                </p>
+                              </td>
+
+                              {/* 3. Category + Priority */}
+                              <td className="py-2.5 px-3 align-middle">
+                                <div className="space-y-1">
+                                  <div className="flex items-center gap-1.5 flex-wrap">
+                                    <span className="font-semibold text-slate-800 block truncate" title={report.category}>
+                                      {report.category || 'Incident'}
+                                    </span>
+                                    {report.needsReview && (
+                                      <span
+                                        className="inline-flex items-center gap-1 px-1.5 py-0.2 rounded text-[9px] font-bold bg-amber-100 text-amber-900 border border-amber-300 shrink-0"
+                                        title="Safety Rule: Flagged for manual review (Confidence <60% or unverified category)"
+                                      >
+                                        <AlertTriangle className="w-2.5 h-2.5 text-amber-700 shrink-0" />
+                                        <span>Needs review</span>
+                                      </span>
+                                    )}
+                                  </div>
+                                  <span
+                                    className={`inline-flex items-center gap-1 px-1.5 py-0.2 rounded text-[10px] font-bold ${
+                                      report.priority === 'Urgent'
+                                        ? 'bg-red-100 text-red-800'
+                                        : report.priority === 'High'
+                                        ? 'bg-amber-100 text-amber-800'
+                                        : 'bg-slate-100 text-slate-700'
+                                    }`}
+                                  >
+                                    {report.priority === 'Urgent' && (
+                                      <AlertTriangle className="w-2.5 h-2.5 text-red-600 shrink-0" />
+                                    )}
+                                    <span>{report.priority || 'Medium'}</span>
+                                  </span>
+                                </div>
+                              </td>
+
+                              {/* 4. Location */}
+                              <td className="py-2.5 px-3 align-middle text-slate-600">
+                                <div className="flex items-center gap-1">
+                                  <MapPin className="w-3 h-3 text-slate-400 shrink-0" />
+                                  <span className="truncate" title={report.countyOrWard}>
+                                    {report.locationTown || report.countyOrWard.split('·')[0].trim()}
+                                  </span>
+                                </div>
+                              </td>
+
+                              {/* 5. Team */}
+                              <td className="py-2.5 px-3 align-middle">
+                                <span className="font-medium text-slate-900 block truncate" title={report.assignedTeam || 'Unassigned'}>
+                                  {report.assignedTeam || (
+                                    <span className="text-amber-700 font-semibold">Unassigned</span>
+                                  )}
+                                </span>
+                              </td>
+
+                              {/* 6. Status & SLA Clock */}
+                              <td className="py-2.5 px-3 align-middle">
+                                <div className="space-y-1">
+                                  <span
+                                    className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-2xs font-semibold ${
+                                      report.status === 'Resolved'
+                                        ? 'bg-emerald-100 text-emerald-800'
+                                        : report.status === 'In Progress'
+                                        ? 'bg-sky-100 text-sky-800'
+                                        : report.status === 'Assigned'
+                                        ? 'bg-indigo-100 text-indigo-800'
+                                        : 'bg-amber-100 text-amber-800'
+                                    }`}
+                                  >
+                                    <span
+                                      className={`w-1.5 h-1.5 rounded-full ${
+                                        report.status === 'Resolved'
+                                          ? 'bg-emerald-600'
+                                          : report.status === 'In Progress'
+                                          ? 'bg-sky-600 animate-pulse'
+                                          : report.status === 'Assigned'
+                                          ? 'bg-indigo-600'
+                                          : 'bg-amber-600'
+                                      }`}
+                                    />
+                                    <span>{report.status}</span>
+                                  </span>
+                                  {report.slaStartedAt && report.status === 'Assigned' && (
+                                    <span
+                                      className="text-[10px] font-mono text-indigo-700 flex items-center gap-0.5 truncate"
+                                      title={`SLA started at ${new Date(report.slaStartedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`}
+                                    >
+                                      <Clock className="w-2.5 h-2.5 text-indigo-500 shrink-0" />
+                                      <span>SLA active</span>
+                                    </span>
+                                  )}
+                                </div>
+                              </td>
+
+                              {/* 7. Actions */}
+                              <td className="py-2.5 px-3 align-middle text-right">
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    handleOpenInspect(report);
+                                  }}
+                                  className="px-2 py-1 text-xs font-semibold text-emerald-800 bg-emerald-50 hover:bg-emerald-100 rounded-lg transition-colors cursor-pointer"
+                                >
+                                  Dispatch &rarr;
+                                </button>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+
+                {/* Load More Button (15 rows step) */}
+                {filteredSubmissions.length > visibleCount && (
+                  <div className="p-3 bg-slate-50 border-t border-slate-200 flex items-center justify-between text-xs text-slate-500">
+                    <span>
+                      Showing {Math.min(visibleCount, filteredSubmissions.length)} of {filteredSubmissions.length} incidents
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setVisibleCount((prev) => prev + 15)}
+                      className="px-4 py-1.5 text-xs font-semibold text-emerald-800 bg-white hover:bg-emerald-50 border border-emerald-300 rounded-lg shadow-2xs transition-colors cursor-pointer"
+                    >
+                      Load more (+15)
+                    </button>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* ================= PAGE 3: CHANNEL FEEDS ================= */}
+          {currentPage === 'channels' && (
+            <div className="space-y-5 animate-in fade-in duration-150">
+              {/* Header Actions: Sync Feeds & Clear Feeds (Lives ONLY here) */}
+              <div className="bg-white border border-slate-200 rounded-xl p-4.5 shadow-2xs flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                <div>
+                  <h3 className="text-base font-bold text-slate-900 flex items-center gap-2">
+                    <Radio className="w-5 h-5 text-emerald-700" />
+                    <span>Channel Aggregation Sources &amp; Ingestion</span>
+                  </h3>
+                  <p className="text-xs text-slate-500 mt-0.5">
+                    Live telemetry aggregating customer inquiries across digital, telecom, and voice endpoints.
+                  </p>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-2.5">
+                  <button
+                    type="button"
+                    onClick={handleToggleSyncFeeds}
+                    className={`inline-flex items-center gap-2 px-4 py-2 text-xs font-bold rounded-xl transition-colors cursor-pointer border shadow-2xs ${
+                      isSyncingFeeds
+                        ? 'bg-amber-500 hover:bg-amber-600 text-white border-amber-600 animate-pulse'
+                        : 'bg-emerald-50 hover:bg-emerald-100 text-emerald-950 border-emerald-300'
+                    }`}
+                  >
+                    {isSyncingFeeds ? (
+                      <>
+                        <Loader2 className="w-4 h-4 animate-spin text-white" />
+                        <span>Syncing Feeds ({syncProgress.current}/{syncProgress.total})...</span>
+                      </>
+                    ) : (
+                      <>
+                        <Radio className="w-4 h-4 text-emerald-700" />
+                        <span>Sync channel feeds</span>
+                      </>
+                    )}
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={handleClearSyncedFeeds}
+                    className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold text-rose-700 hover:text-rose-900 bg-rose-50 hover:bg-rose-100 border border-rose-200 rounded-xl transition-colors cursor-pointer shadow-2xs"
+                  >
+                    <Trash2 className="w-4 h-4 text-rose-600" />
+                    <span>Clear synced feeds{syncedFeedsCount > 0 ? ` (${syncedFeedsCount})` : ''}</span>
+                  </button>
+                </div>
+              </div>
+
+              {/* Channel Cards Grid */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3.5">
+                {CHANNELS.filter((ch) => ch !== 'All Channels').map((ch) => {
+                  const count = channelCounts[ch] || 0;
+                  const pct = metrics.total > 0 ? Math.round((count / metrics.total) * 100) : 0;
+                  return (
+                    <div
+                      key={ch}
+                      className="bg-white border border-slate-200 rounded-xl p-4.5 shadow-2xs space-y-3 hover:border-emerald-500 transition-colors"
+                    >
+                      <div className="flex items-center justify-between">
+                        {renderChannelBadge(ch)}
+                        <span className="text-xs font-mono font-bold text-slate-500">{pct}% of queue</span>
+                      </div>
+
+                      <div>
+                        <p className="text-3xl font-black font-mono text-slate-900 tabular-nums">
+                          {count}
+                        </p>
+                        <p className="text-xs text-slate-500 mt-0.5">Complaints registered</p>
+                      </div>
+
+                      <div className="w-full bg-slate-100 h-2 rounded-full overflow-hidden">
+                        <div
+                          className="bg-emerald-600 h-full rounded-full transition-all"
+                          style={{ width: `${pct}%` }}
+                        />
+                      </div>
+
+                      <div className="pt-2 border-t border-slate-100 flex items-center justify-between">
+                        <span className="inline-flex items-center gap-1.5 text-2xs text-emerald-700 font-semibold">
+                          <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+                          <span>Active Stream</span>
+                        </span>
+
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setSelectedChannel(ch);
+                            navigateTo('incidents');
+                          }}
+                          className="text-xs font-bold text-emerald-800 hover:text-emerald-950 underline cursor-pointer"
+                        >
+                          Filter queue &rarr;
+                        </button>
+                      </div>
+                    </div>
                   );
                 })}
               </div>
             </div>
-
-            <div className="flex items-center gap-3 text-2xs text-slate-500">
-              <span className="hidden lg:inline text-slate-400 italic">
-                Click any stage badge to filter queue
-              </span>
-              {selectedStatus !== 'All' && (
-                <button
-                  type="button"
-                  onClick={() => setSelectedStatus('All')}
-                  className="font-bold text-emerald-700 hover:text-emerald-900 underline cursor-pointer"
-                >
-                  Clear Status Filter ({selectedStatus})
-                </button>
-              )}
-            </div>
-          </div>
-
-          {filteredSubmissions.length === 0 ? (
-            <div className="p-12 text-center space-y-3">
-              <Bot className="w-8 h-8 text-slate-300 mx-auto" />
-              <p className="text-sm font-medium text-slate-700">No incident reports match your current filter.</p>
-              <button
-                type="button"
-                onClick={() => {
-                  setSearchQuery('');
-                  setSelectedStatus('All');
-                  setSelectedTeamFilter('All');
-                  setSelectedLanguageFilter('All');
-                }}
-                className="px-3.5 py-2 text-xs font-semibold text-emerald-800 bg-emerald-50 rounded-lg cursor-pointer"
-              >
-                Reset Filters
-              </button>
-            </div>
-          ) : (
-            <div className="overflow-x-auto">
-              <table className="w-full text-left text-xs border-collapse">
-                <thead>
-                  <tr className="bg-slate-50/80 border-b border-slate-200 text-slate-500 font-semibold uppercase tracking-wider text-[11px]">
-                    <th className="py-3 px-4">Ticket &amp; Origin</th>
-                    <th className="py-3 px-4 min-w-[260px]">Customer Incident Statement</th>
-                    <th className="py-3 px-4 min-w-[190px]">AI Classification &amp; Urgency</th>
-                    <th className="py-3 px-4 min-w-[280px]">AI Resolution Insights (Informed Steps)</th>
-                    <th className="py-3 px-4 min-w-[210px]">Assigned Team &amp; Officer</th>
-                    <th className="py-3 px-4">Status &amp; Stage</th>
-                    <th className="py-3 px-4 text-right">Actions</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-100">
-                  {filteredSubmissions.map((report) => {
-                    const isUrgent = report.priority === 'Urgent';
-                    const isUnassigned = !report.assignedTeam || report.status === 'Received';
-
-                    return (
-                      <tr
-                        key={report.id}
-                        className={`hover:bg-slate-50/80 transition-colors border-l-4 ${
-                          report.status === 'Resolved'
-                            ? 'border-l-emerald-500'
-                            : report.status === 'In Progress'
-                            ? 'border-l-sky-500 bg-sky-50/10'
-                            : report.status === 'Assigned'
-                            ? 'border-l-indigo-500'
-                            : report.status === 'Closed'
-                            ? 'border-l-slate-300'
-                            : 'border-l-amber-500'
-                        } ${isUrgent ? 'bg-red-50/30' : ''}`}
-                      >
-                        {/* 1. Ticket Code, Location & Inflow Channel Badge */}
-                        <td className="py-3.5 px-4 align-top space-y-1.5">
-                          <div className="flex items-center justify-between gap-1">
-                            <p className="font-mono font-bold text-emerald-900 tabular-nums">
-                              {report.referenceCode}
-                            </p>
-                            {report.isSyncedFeed && (
-                              <span className="px-1.5 py-0.2 rounded text-[9px] font-mono font-bold bg-emerald-100 text-emerald-800 border border-emerald-200">
-                                LIVE FEED
-                              </span>
-                            )}
-                          </div>
-                          <div className="flex items-center gap-1 text-[11px] text-slate-500">
-                            <MapPin className="w-3 h-3 text-emerald-700 shrink-0" />
-                            <span className="truncate max-w-[130px]">{report.countyOrWard}</span>
-                          </div>
-                          {/* Channel Badge (with Zuri, One App, USSD, WhatsApp, etc.) */}
-                          <div className="flex flex-wrap items-center gap-1.5 pt-0.5">
-                            {renderChannelBadge(report.channel, report.captureMethod)}
-                            <span className="text-[10px] text-slate-400 font-mono">
-                              {report.detectedLanguage}
-                            </span>
-                          </div>
-                          {/* Handle badge if present */}
-                          {report.handle && (
-                            <div className="flex items-center gap-1 text-[10px] text-slate-600 bg-slate-100 px-1.5 py-0.5 rounded border border-slate-200 font-mono">
-                              <AtSign className="w-3 h-3 text-slate-400 shrink-0" />
-                              <span className="truncate max-w-[120px]">{report.handle}</span>
-                            </div>
-                          )}
-                          {/* GPS Coordinates if present */}
-                          {typeof report.latitude === 'number' && typeof report.longitude === 'number' && (
-                            <div className="text-[9px] font-mono text-slate-400">
-                              📍 {report.latitude.toFixed(4)}, {report.longitude.toFixed(4)}
-                            </div>
-                          )}
-                        </td>
-
-                        {/* 2. Citizen Statement & English Translation */}
-                        <td className="py-3.5 px-4 align-top space-y-1.5 max-w-md">
-                          <p className="text-slate-900 font-medium leading-relaxed">
-                            &ldquo;{report.text}&rdquo;
-                          </p>
-                          {report.englishTranslation && report.detectedLanguage !== 'English' && (
-                            <p className="text-[11px] text-slate-500 italic leading-snug">
-                              Translation: &ldquo;{report.englishTranslation}&rdquo;
-                            </p>
-                          )}
-                          {report.contactInfo && (
-                            <p className="text-[10px] font-mono text-emerald-800">
-                              Contact: {report.contactInfo}
-                            </p>
-                          )}
-                        </td>
-
-                        {/* 3. AI Determined Type & Urgency */}
-                        <td className="py-3.5 px-4 align-top space-y-1.5">
-                          <div className="flex items-center gap-1.5">
-                            <span
-                              className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider ${
-                                report.priority === 'Urgent'
-                                  ? 'bg-red-100 text-red-800 border border-red-200'
-                                  : report.priority === 'High'
-                                  ? 'bg-amber-100 text-amber-800 border border-amber-200'
-                                  : report.priority === 'Medium'
-                                  ? 'bg-blue-100 text-blue-800 border border-blue-200'
-                                  : 'bg-slate-100 text-slate-700'
-                              }`}
-                            >
-                              {report.priority || 'Medium'}
-                            </span>
-                            <span className="font-semibold text-slate-800 text-xs">
-                              {report.category || 'General Civic'}
-                            </span>
-                          </div>
-
-                          {report.aiClassification && (
-                            <div className="bg-slate-100/90 rounded p-1.5 text-[11px] text-slate-600 space-y-0.5">
-                              <p className="line-clamp-2">
-                                <span className="font-semibold text-slate-700">AI Logic: </span>
-                                {report.aiClassification.rationale}
-                              </p>
-                              <p className="text-[10px] text-emerald-800 font-mono">
-                                Target SLA: {report.aiClassification.estimatedSLA}
-                              </p>
-                            </div>
-                          )}
-                        </td>
-
-                        {/* 4. AI Resolution Insights & Informed Actionable Steps */}
-                        <td className="py-3.5 px-4 align-top space-y-1.5 min-w-[280px]">
-                          <div className="bg-emerald-50/70 border border-emerald-200/90 rounded-lg p-2.5 space-y-2 shadow-2xs">
-                            <div className="flex items-center justify-between gap-1.5">
-                              <span className="inline-flex items-center gap-1 text-[11px] font-bold text-emerald-950">
-                                <Sparkles className="w-3 h-3 text-emerald-600" />
-                                <span>AI Resolution Directives</span>
-                              </span>
-                              <span className="text-[10px] font-mono font-bold px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-800">
-                                SLA: {report.aiClassification?.estimatedSLA || '2 hours'}
-                              </span>
-                            </div>
-
-                            {/* Root Cause hypothesis */}
-                            <div className="text-[11px] text-slate-800 bg-white/95 border border-emerald-100/90 rounded p-1.5 leading-snug">
-                              <span className="font-bold text-emerald-900">Root Cause: </span>
-                              <span className="text-slate-700">
-                                {report.aiRootCause ||
-                                  (report.operationalCategory === 'Fibre' || report.category?.includes('Fibre')
-                                    ? 'Optical drop cable attenuation / break on local distribution terminal.'
-                                    : report.operationalCategory === 'M-PESA' || report.category?.includes('M-PESA')
-                                    ? 'Payment callback gateway timeout between core switch and merchant API.'
-                                    : report.operationalCategory === 'Network Outage'
-                                    ? 'AC utility power surge tripped primary BTS transmission breaker.'
-                                    : report.operationalCategory === 'Slow Internet'
-                                    ? 'High-density cell carrier congestion on local eNodeB sector.'
-                                    : report.operationalCategory === 'Voice Calls'
-                                    ? 'Corrupted transient subscriber location register (VLR) routing table.'
-                                    : report.operationalCategory === 'Billing'
-                                    ? 'Automated CRM recurring charge cycle ignored account suspension flag.'
-                                    : 'Low-band 800MHz indoor propagation loss due to masonry structures.')}
-                              </span>
-                            </div>
-
-                            {/* Informed Step-by-Step Directives */}
-                            <div className="space-y-1 pt-0.5">
-                              <p className="text-[10px] font-bold uppercase tracking-wider text-slate-500">
-                                Actionable Technical Steps:
-                              </p>
-                              <ol className="space-y-1 text-[11px] text-slate-800 list-none">
-                                {(report.aiResolutionSteps || [
-                                  'Execute remote optical/radio loopback diagnostic test to isolate fault point.',
-                                  'Dispatch specialized field team with calibrated fault locator to location.',
-                                  'Confirm telemetry restoration and trigger customer SMS verification memo.'
-                                ]).map((step, idx) => (
-                                  <li key={idx} className="flex items-start gap-1.5 leading-snug">
-                                    <span className="w-3.5 h-3.5 rounded-full bg-emerald-700 text-white text-[9px] font-bold flex items-center justify-center shrink-0 mt-0.5">
-                                      {idx + 1}
-                                    </span>
-                                    <span className="text-slate-700">{step}</span>
-                                  </li>
-                                ))}
-                              </ol>
-                            </div>
-
-                            {/* Copy Steps Directive */}
-                            <div className="pt-1 flex items-center justify-between border-t border-emerald-200/50 text-[10px]">
-                              <span className="text-emerald-800/80 font-mono text-2xs">Safaricom AI Core</span>
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  const steps = (report.aiResolutionSteps || [
-                                    'Execute remote loopback diagnostic check.',
-                                    'Dispatch specialized field team to location.',
-                                    'Confirm telemetry restoration and trigger customer SMS memo.'
-                                  ]).map((s, i) => `${i + 1}. ${s}`).join('\n');
-                                  const text = `TICKET REF: ${report.referenceCode}\nROOT CAUSE: ${report.aiRootCause || 'Under investigation'}\nRESOLUTION STEPS:\n${steps}`;
-                                  navigator.clipboard.writeText(text);
-                                  setCopiedStepsTicket(report.referenceCode);
-                                  setTimeout(() => setCopiedStepsTicket(null), 2500);
-                                }}
-                                className="inline-flex items-center gap-1 font-semibold text-emerald-800 hover:text-emerald-950 cursor-pointer"
-                                title="Copy resolution steps to clipboard"
-                              >
-                                {copiedStepsTicket === report.referenceCode ? (
-                                  <>
-                                    <Check className="w-3 h-3 text-emerald-600" />
-                                    <span>Copied Steps!</span>
-                                  </>
-                                ) : (
-                                  <>
-                                    <Copy className="w-3 h-3 text-emerald-700" />
-                                    <span>Copy Steps</span>
-                                  </>
-                                )}
-                              </button>
-                            </div>
-                          </div>
-                        </td>
-
-                        {/* 5. Assigned Team & Lead Officer */}
-                        <td className="py-3.5 px-4 align-top space-y-1">
-                          {report.assignedTeam ? (
-                            <div>
-                              <p className="font-semibold text-slate-900 leading-tight">
-                                {report.assignedTeam}
-                              </p>
-                              <p className="text-[11px] text-slate-500">
-                                Officer: {report.assignedOfficer || 'Field Lead'}
-                              </p>
-                              {report.assignedOfficerEmail && (
-                                <p className="text-[10px] text-slate-500 font-mono truncate max-w-[200px] flex items-center gap-1 mt-0.5">
-                                  <AtSign className="w-2.5 h-2.5 text-slate-400 shrink-0" />
-                                  <span>{report.assignedOfficerEmail}</span>
-                                </p>
-                              )}
-                              {report.adminNotes && (
-                                <p className="text-[10px] text-slate-500 italic mt-0.5 truncate max-w-[200px]">
-                                  Note: {report.adminNotes}
-                                </p>
-                              )}
-
-                              {/* Automated Email Alert Badge & Trigger */}
-                              <div className="pt-1.5">
-                                {report.emailAlertSent ? (
-                                  <button
-                                    type="button"
-                                    onClick={() => setInspectingEmailAlert(report)}
-                                    className="inline-flex items-center gap-1 text-[10px] font-semibold text-emerald-800 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 px-2 py-0.5 rounded cursor-pointer transition-colors"
-                                    title={`View automated email alert delivered to ${report.assignedOfficerEmail || report.assignedOfficer || 'officer'}`}
-                                  >
-                                    <MailCheck className="w-3 h-3 text-emerald-700" />
-                                    <span>Alert Delivered</span>
-                                  </button>
-                                ) : (
-                                  <button
-                                    type="button"
-                                    disabled={sendingEmailForId === report.id}
-                                    onClick={() => handleSendEmailAlertForReport(report)}
-                                    className="inline-flex items-center gap-1 text-[10px] font-semibold text-sky-800 bg-sky-50 hover:bg-sky-100 border border-sky-200 px-2 py-0.5 rounded cursor-pointer transition-colors disabled:opacity-50"
-                                    title="Dispatch automated email alert to assigned officer"
-                                  >
-                                    {sendingEmailForId === report.id ? (
-                                      <Loader2 className="w-2.5 h-2.5 animate-spin text-sky-700" />
-                                    ) : (
-                                      <Send className="w-2.5 h-2.5 text-sky-600" />
-                                    )}
-                                    <span>Send Alert Email</span>
-                                  </button>
-                                )}
-                              </div>
-                            </div>
-                          ) : (
-                            <div className="space-y-1">
-                              <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-amber-700 bg-amber-50 px-2 py-0.5 rounded border border-amber-200">
-                                <Clock className="w-3 h-3" />
-                                <span>Unassigned</span>
-                              </span>
-                              {report.aiClassification?.recommendedTeam && (
-                                <p className="text-[10px] text-slate-500">
-                                  Suggested: {report.aiClassification.recommendedTeam}
-                                </p>
-                              )}
-                            </div>
-                          )}
-                        </td>
-
-                        {/* 5. Status Selector with Visual Status Dot */}
-                        <td className="py-3.5 px-4 align-top space-y-1">
-                          <div className="flex items-center gap-2">
-                            <span
-                              className={`w-2.5 h-2.5 rounded-full shrink-0 shadow-2xs ${
-                                report.status === 'Resolved'
-                                  ? 'bg-emerald-500'
-                                  : report.status === 'In Progress'
-                                  ? 'bg-sky-500 ring-2 ring-sky-300 animate-pulse'
-                                  : report.status === 'Assigned'
-                                  ? 'bg-indigo-500'
-                                  : report.status === 'Closed'
-                                  ? 'bg-slate-400'
-                                  : 'bg-amber-500 ring-2 ring-amber-300'
-                              }`}
-                              title={`Current stage: ${report.status}`}
-                              aria-hidden="true"
-                            />
-                            <select
-                              value={report.status}
-                              onChange={(e) =>
-                                handleQuickStatusChange(report, e.target.value as ReportStatus)
-                              }
-                              className={`px-2 py-1 rounded text-xs font-semibold border cursor-pointer ${
-                                report.status === 'Resolved' || report.status === 'Closed'
-                                  ? 'bg-emerald-50 text-emerald-800 border-emerald-300'
-                                  : report.status === 'In Progress'
-                                  ? 'bg-sky-50 text-sky-800 border-sky-300'
-                                  : report.status === 'Assigned'
-                                  ? 'bg-indigo-50 text-indigo-800 border-indigo-300'
-                                  : 'bg-amber-50 text-amber-800 border-amber-300'
-                              }`}
-                            >
-                              <option value="Received">Received</option>
-                              <option value="Assigned">Assigned</option>
-                              <option value="In Progress">In Progress</option>
-                              <option value="Resolved">Resolved</option>
-                              <option value="Closed">Closed</option>
-                            </select>
-                          </div>
-                          <p className="text-[10px] text-slate-500 pl-4.5 font-medium">
-                            {report.status === 'Received' && 'Awaiting triage'}
-                            {report.status === 'Assigned' && 'Dispatched to team'}
-                            {report.status === 'In Progress' && 'Active intervention'}
-                            {report.status === 'Resolved' && 'Resolution confirmed'}
-                            {report.status === 'Closed' && 'Archived cycle'}
-                          </p>
-                        </td>
-
-                        {/* 6. Action Buttons */}
-                        <td className="py-3.5 px-4 align-top text-right space-y-1.5 whitespace-nowrap">
-                          {isUnassigned && (
-                            <button
-                              type="button"
-                              disabled={classifyingId === report.id}
-                              onClick={() => handleSingleAutoAssign(report)}
-                              className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-bold text-white bg-emerald-700 hover:bg-emerald-800 rounded transition-colors cursor-pointer"
-                              title="Determine request type with AI and assign to optimal team"
-                            >
-                              {classifyingId === report.id ? (
-                                <Loader2 className="w-3 h-3 animate-spin" />
-                              ) : (
-                                <Sparkles className="w-3 h-3" />
-                              )}
-                              <span>Auto-Assign</span>
-                            </button>
-                          )}
-
-                          <div>
-                            <button
-                              type="button"
-                              onClick={() => handleOpenInspect(report)}
-                              className="text-xs font-semibold text-slate-700 hover:text-emerald-800 underline cursor-pointer"
-                            >
-                              Dispatch Details
-                            </button>
-                          </div>
-
-                          {report.emailAlertSent && (
-                            <div>
-                              <button
-                                type="button"
-                                onClick={() => setInspectingEmailAlert(report)}
-                                className="inline-flex items-center gap-1 text-[11px] font-semibold text-emerald-700 hover:text-emerald-950 underline cursor-pointer"
-                                title="View full officer automated email dispatch notice"
-                              >
-                                <MailCheck className="w-3 h-3" />
-                                <span>View Email</span>
-                              </button>
-                            </div>
-                          )}
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
           )}
-        </section>
-      </main>
 
-      {/* Dispatch & Assign Modal */}
-      {inspectingReport && (
-        <div
-          className="fixed inset-0 z-50 bg-slate-950/60 backdrop-blur-xs flex items-center justify-center p-4"
-          role="dialog"
-          aria-modal="true"
-          aria-labelledby="dispatch-modal-title"
-        >
-          <div className="bg-white border border-slate-200 rounded-2xl max-w-2xl w-full p-6 space-y-5 shadow-2xl max-h-[90vh] overflow-y-auto">
-            {/* Modal Header */}
-            <div className="flex items-start justify-between gap-4 border-b border-slate-100 pb-3">
-              <div>
-                <p className="text-xs font-mono font-semibold text-emerald-800">
-                  {inspectingReport.referenceCode} · {inspectingReport.countyOrWard}
-                </p>
-                <h3 id="dispatch-modal-title" className="text-lg font-bold text-slate-900 mt-0.5">
-                  Citizen Incident Dispatch &amp; Team Assignment
-                </h3>
-              </div>
-              <button
-                type="button"
-                onClick={() => setInspectingReport(null)}
-                className="p-1.5 text-slate-400 hover:text-slate-700 rounded-lg hover:bg-slate-100 transition-colors cursor-pointer"
-                aria-label="Close Modal"
-              >
-                <X className="w-5 h-5" />
-              </button>
-            </div>
-
-            {/* Verbatim Citizen Voice Box */}
-            <div className="bg-slate-50 border border-slate-200 rounded-xl p-4 space-y-2">
-              <div className="flex items-center justify-between text-xs text-slate-500">
-                <span className="font-semibold text-slate-700">Citizen Voice Record:</span>
-                <span className="font-mono">
-                  {inspectingReport.detectedLanguage} ·{' '}
-                  {new Date(inspectingReport.createdAt).toLocaleTimeString([], {
-                    hour: '2-digit',
-                    minute: '2-digit',
-                  })}{' '}
-                  EAT
-                </span>
-              </div>
-              <p className="text-sm font-medium text-slate-900 leading-relaxed">
-                &ldquo;{inspectingReport.text}&rdquo;
-              </p>
-              {inspectingReport.englishTranslation && (
-                <p className="text-xs text-slate-500 italic">
-                  English Translation: &ldquo;{inspectingReport.englishTranslation}&rdquo;
-                </p>
-              )}
-              {inspectingReport.contactInfo && (
-                <p className="text-xs text-emerald-900 font-mono pt-1">
-                  Citizen Follow-up Contact: {inspectingReport.contactInfo}
-                </p>
-              )}
-            </div>
-
-            {/* AI Request Type & Urgency Recommendation */}
-            {inspectingReport.aiClassification && (
-              <div className="bg-emerald-50/70 border border-emerald-200 rounded-xl p-4 space-y-2">
-                <div className="flex items-center gap-1.5 text-xs font-bold text-emerald-950">
-                  <Sparkles className="w-4 h-4 text-emerald-700" />
-                  <span>AI Incident Analysis &amp; Routing Recommendation</span>
-                </div>
-                <div className="grid grid-cols-2 gap-3 text-xs">
+          {/* ================= PAGE 4: ROOT CAUSE & CLUSTERS ================= */}
+          {currentPage === 'clusters' && (
+            <div className="space-y-5 animate-in fade-in duration-150">
+              {/* Header */}
+              <div className="bg-white border border-slate-200 rounded-xl p-4.5 shadow-2xs">
+                <div className="flex items-center gap-3">
+                  <span className="w-10 h-10 rounded-xl bg-amber-500 text-white flex items-center justify-center shadow-xs">
+                    <Zap className="w-5 h-5 fill-current" />
+                  </span>
                   <div>
-                    <span className="text-slate-500">Determined Domain:</span>
-                    <p className="font-semibold text-slate-900">
-                      {inspectingReport.aiClassification.category}
-                    </p>
-                  </div>
-                  <div>
-                    <span className="text-slate-500">Urgency Assessment:</span>
-                    <p className="font-semibold text-red-700">
-                      {inspectingReport.aiClassification.urgency}
+                    <h3 className="text-base font-bold text-slate-900 flex items-center gap-2">
+                      <span>Issue Clustering &amp; Root Cause Analysis</span>
+                      <span className="px-2.5 py-0.5 rounded-full text-xs font-mono font-bold bg-amber-100 text-amber-900 border border-amber-300">
+                        5 Active National Clusters
+                      </span>
+                    </h3>
+                    <p className="text-xs text-slate-600 mt-0.5">
+                      Correlates incoming complaints across all channels to identify single-point infrastructure disruptions.
                     </p>
                   </div>
                 </div>
-                <div className="text-xs text-slate-700">
-                  <span className="text-slate-500">Routing Rationale: </span>
-                  {inspectingReport.aiClassification.rationale}
-                </div>
-                <div className="text-xs font-mono text-emerald-900">
-                  Target SLA: {inspectingReport.aiClassification.estimatedSLA}
-                </div>
-              </div>
-            )}
-
-            {/* Assignment Form */}
-            <form onSubmit={handleSaveDispatch} className="space-y-4">
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                <div className="sm:col-span-1">
-                  <label htmlFor="team-select" className="block text-xs font-medium text-slate-700 mb-1">
-                    Assign to Relevant Response Team
-                  </label>
-                  <select
-                    id="team-select"
-                    value={dispatchTeam}
-                    onChange={(e) => handleTeamChange(e.target.value)}
-                    className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-lg text-slate-900 font-medium focus:outline-none focus:border-emerald-600"
-                  >
-                    {KENYAN_RESPONSE_TEAMS.map((team) => (
-                      <option key={team.id} value={team.name}>
-                        {team.name}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-
-                <div className="sm:col-span-1">
-                  <label htmlFor="officer-input" className="block text-xs font-medium text-slate-700 mb-1">
-                    Lead Assigned Officer
-                  </label>
-                  <input
-                    id="officer-input"
-                    type="text"
-                    value={dispatchOfficer}
-                    onChange={(e) => setDispatchOfficer(e.target.value)}
-                    className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-lg text-slate-900 focus:outline-none focus:border-emerald-600"
-                  />
-                </div>
-
-                <div className="sm:col-span-1">
-                  <label htmlFor="officer-email" className="block text-xs font-medium text-slate-700 mb-1 flex items-center justify-between">
-                    <span>Officer Official Email</span>
-                    <span className="text-[10px] text-emerald-700 font-semibold">Safaricom Mail</span>
-                  </label>
-                  <input
-                    id="officer-email"
-                    type="email"
-                    value={dispatchOfficerEmail}
-                    onChange={(e) => setDispatchOfficerEmail(e.target.value)}
-                    placeholder="e.g. officer@safaricom.co.ke"
-                    className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-lg text-slate-900 font-mono focus:outline-none focus:border-emerald-600"
-                  />
-                </div>
               </div>
 
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                <div>
-                  <label htmlFor="priority-select" className="block text-xs font-medium text-slate-700 mb-1">
-                    Priority &amp; Urgency
-                  </label>
-                  <select
-                    id="priority-select"
-                    value={dispatchPriority}
-                    onChange={(e) => setDispatchPriority(e.target.value as PriorityLevel)}
-                    className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-lg text-slate-900 focus:outline-none focus:border-emerald-600"
-                  >
-                    <option value="Urgent">Urgent (Immediate Danger / Outage)</option>
-                    <option value="High">High Priority (Active Disruption)</option>
-                    <option value="Medium">Medium (Standard Issue)</option>
-                    <option value="Routine">Routine (Inquiry / Scheduled)</option>
-                  </select>
-                </div>
-
-                <div>
-                  <label htmlFor="status-select" className="block text-xs font-medium text-slate-700 mb-1">
-                    Dispatch Status
-                  </label>
-                  <select
-                    id="status-select"
-                    value={dispatchStatus}
-                    onChange={(e) => setDispatchStatus(e.target.value as ReportStatus)}
-                    className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-lg text-slate-900 focus:outline-none focus:border-emerald-600"
-                  >
-                    <option value="Assigned">Assigned to Unit</option>
-                    <option value="In Progress">In Progress / Field Dispatched</option>
-                    <option value="Resolved">Resolved</option>
-                    <option value="Closed">Closed</option>
-                  </select>
-                </div>
-              </div>
-
-              <div>
-                <label htmlFor="notes-input" className="block text-xs font-medium text-slate-700 mb-1">
-                  Dispatch Notes / Field Instructions
-                </label>
-                <textarea
-                  id="notes-input"
-                  rows={3}
-                  value={dispatchNotes}
-                  onChange={(e) => setDispatchNotes(e.target.value)}
-                  placeholder="e.g. Field crew instructed to bring pipe welding equipment to Umoja Stage..."
-                  className="w-full p-2.5 text-xs bg-slate-50 border border-slate-200 rounded-lg text-slate-900 focus:outline-none focus:border-emerald-600"
-                />
-              </div>
-
-              {/* Automated Email Alert Option & Preview */}
-              <div className="bg-emerald-50/70 border border-emerald-200 rounded-xl p-3.5 space-y-2.5">
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <label className="flex items-center gap-2 cursor-pointer select-none">
-                    <input
-                      type="checkbox"
-                      checked={sendAutomatedEmail}
-                      onChange={(e) => setSendAutomatedEmail(e.target.checked)}
-                      className="w-4 h-4 rounded text-emerald-700 focus:ring-emerald-600 border-slate-300 cursor-pointer"
-                    />
-                    <span className="text-xs font-semibold text-emerald-950 flex items-center gap-1.5">
-                      <MailCheck className="w-4 h-4 text-emerald-700" />
-                      <span>Send automated email alert to assigned officer upon dispatch</span>
+              {/* Primary Hub: Ruaka Highlight */}
+              <div className="bg-gradient-to-br from-amber-50 via-white to-amber-50/40 border-2 border-amber-400 rounded-2xl p-4.5 space-y-4 shadow-xs">
+                <div className="flex flex-wrap items-center justify-between gap-3 border-b border-amber-200/80 pb-3">
+                  <div className="flex items-center gap-2.5">
+                    <span className="px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider bg-amber-500 text-white shadow-2xs">
+                      CRITICAL CLUSTER HUB #1
                     </span>
-                  </label>
-
-                  {sendAutomatedEmail && (
+                    <h4 className="text-base font-bold text-slate-900">
+                      Ruaka High-Density Outage Cluster
+                    </h4>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs font-mono font-bold text-amber-950 bg-amber-200/80 px-2.5 py-1 rounded-lg">
+                      73 Impacted Complaints
+                    </span>
                     <button
                       type="button"
-                      onClick={() => setShowEmailPreview(!showEmailPreview)}
-                      className="text-[11px] font-semibold text-emerald-800 hover:text-emerald-950 underline cursor-pointer"
+                      onClick={() => {
+                        setSelectedLocation('Ruaka');
+                        navigateTo('incidents');
+                      }}
+                      className="inline-flex items-center gap-1.5 px-3 py-1 text-xs font-bold text-white bg-emerald-700 hover:bg-emerald-800 rounded-lg transition-colors cursor-pointer"
                     >
-                      {showEmailPreview ? 'Hide Memo Preview' : 'Preview Email Memo'}
+                      <span>Filter Queue to Ruaka</span>
+                      <ArrowRight className="w-3.5 h-3.5" />
                     </button>
-                  )}
+                  </div>
                 </div>
 
-                {sendAutomatedEmail && (
-                  <p className="text-[11px] text-emerald-900/80 leading-snug pl-6">
-                    Dispatches an immediate notification to <strong className="font-mono text-emerald-950">{dispatchOfficerEmail || 'assigned officer'}</strong> with incident reference, SLA deadline, verbatim transcript, and field instructions.
-                  </p>
-                )}
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-xs">
+                  <div className="space-y-1 md:col-span-2">
+                    <span className="font-bold text-amber-950 uppercase tracking-wider text-[11px] flex items-center gap-1">
+                      <ShieldAlert className="w-3.5 h-3.5 text-amber-600" />
+                      <span>Identified Root Cause:</span>
+                    </span>
+                    <p className="text-slate-800 bg-white/90 border border-amber-200 rounded-lg p-2.5 leading-relaxed font-medium">
+                      Road construction excavator along Limuru Road near Two Rivers severed the primary 96-core metro optical fiber backhaul feeder cable, knocking out multiple eNodeB cells and home fiber distribution lines simultaneously.
+                    </p>
+                  </div>
 
-                {/* Email Memo Preview */}
-                {sendAutomatedEmail && showEmailPreview && (
-                  <div className="mt-2 pl-6">
-                    <div className="bg-white border border-emerald-300/80 rounded-lg p-3 text-[11px] font-mono text-slate-800 space-y-1.5 shadow-2xs">
-                      <div className="border-b border-slate-200 pb-1.5 text-slate-600 text-[10px]">
-                        <div><strong className="text-slate-800">To:</strong> {dispatchOfficer} &lt;{dispatchOfficerEmail}&gt;</div>
-                        <div><strong className="text-slate-800">From:</strong> SEMA Incident Dispatch Gateway &lt;dispatch@sema.go.ke&gt;</div>
-                        <div><strong className="text-slate-800">Subject:</strong> [SEMA DISPATCH ALERT] {inspectingReport.referenceCode} - {inspectingReport.category || 'Incident'} ({dispatchPriority} Priority)</div>
+                  <div className="space-y-1">
+                    <span className="font-bold text-slate-700 uppercase tracking-wider text-[11px]">
+                      Impacted Channels:
+                    </span>
+                    <div className="bg-white/90 border border-amber-200 rounded-lg p-2.5 space-y-1 font-mono text-[11px]">
+                      <div className="flex justify-between">
+                        <span className="text-slate-600">Call Center CRM:</span>
+                        <strong className="text-slate-900">24 calls</strong>
                       </div>
-                      <pre className="whitespace-pre-wrap font-mono text-[10px] text-slate-700 max-h-40 overflow-y-auto pt-1 leading-relaxed">
-                        {generateClientEmailAlert(
-                          inspectingReport,
-                          dispatchOfficer,
-                          dispatchOfficerEmail,
-                          dispatchTeam,
-                          dispatchPriority,
-                          dispatchNotes
-                        ).body}
-                      </pre>
+                      <div className="flex justify-between">
+                        <span className="text-slate-600">Social (X/WhatsApp):</span>
+                        <strong className="text-slate-900">33 reports</strong>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-slate-600">Email &amp; Portal:</span>
+                        <strong className="text-slate-900">16 reports</strong>
+                      </div>
                     </div>
                   </div>
-                )}
+                </div>
+
+                <div className="bg-emerald-50/80 border border-emerald-200 rounded-xl p-3 text-xs space-y-1.5">
+                  <span className="font-bold text-emerald-950 flex items-center gap-1.5 text-[11px]">
+                    <CheckCircle2 className="w-3.5 h-3.5 text-emerald-700" />
+                    <span>Active Remediation Directives:</span>
+                  </span>
+                  <ul className="grid grid-cols-1 md:grid-cols-3 gap-2 list-none text-[11px] text-emerald-900">
+                    <li className="flex items-start gap-1.5">
+                      <span className="w-1.5 h-1.5 rounded-full bg-emerald-600 mt-1.5 shrink-0" />
+                      <span>Microwave failover activated.</span>
+                    </li>
+                    <li className="flex items-start gap-1.5">
+                      <span className="w-1.5 h-1.5 rounded-full bg-emerald-600 mt-1.5 shrink-0" />
+                      <span>Splicing crew on-site at pole #14.</span>
+                    </li>
+                    <li className="flex items-start gap-1.5">
+                      <span className="w-1.5 h-1.5 rounded-full bg-emerald-600 mt-1.5 shrink-0" />
+                      <span>Target SLA: Full recovery by 14:00.</span>
+                    </li>
+                  </ul>
+                </div>
               </div>
 
-              <div className="flex items-center justify-end gap-3 pt-3 border-t border-slate-100">
+              {/* Other Correlated National Clusters */}
+              <div className="space-y-3">
+                <h4 className="text-xs font-bold uppercase tracking-wider text-slate-500">
+                  Other Correlated National Clusters:
+                </h4>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5">
+                  {CLUSTERS.slice(1).map((cluster) => (
+                    <div
+                      key={cluster.id}
+                      className="bg-white border border-slate-200 hover:border-slate-300 rounded-xl p-4 space-y-2.5 transition-all text-xs shadow-2xs"
+                    >
+                      <div className="flex items-start justify-between gap-2">
+                        <div>
+                          <h5 className="font-bold text-slate-900">{cluster.name}</h5>
+                          <p className="text-[11px] text-slate-500 flex items-center gap-1 mt-0.5">
+                            <MapPin className="w-3 h-3 text-slate-400" />
+                            <span>{cluster.location}</span>
+                          </p>
+                        </div>
+                        <span className="px-2 py-0.5 rounded-full text-[10px] font-mono font-bold bg-slate-100 text-slate-700 shrink-0">
+                          {cluster.totalComplaints} tickets
+                        </span>
+                      </div>
+
+                      <p className="text-[11px] text-slate-600 leading-snug line-clamp-2">
+                        <strong className="text-slate-700">Root Cause: </strong>
+                        {cluster.rootCause}
+                      </p>
+
+                      <div className="pt-2 border-t border-slate-100 flex items-center justify-between">
+                        <span className="text-[10px] font-semibold text-amber-800 bg-amber-50 px-2 py-0.5 rounded">
+                          {cluster.status}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const town = cluster.location.split('·')[0].trim();
+                            setSelectedLocation(town);
+                            navigateTo('incidents');
+                          }}
+                          className="text-emerald-700 hover:text-emerald-900 font-bold text-[11px] flex items-center gap-1 cursor-pointer"
+                        >
+                          <span>Filter Queue</span>
+                          <ArrowRight className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* ================= PAGE 5: RESPONSE TEAMS ================= */}
+          {currentPage === 'teams' && (
+            <div className="space-y-5 animate-in fade-in duration-150">
+              <div className="bg-white border border-slate-200 rounded-xl p-4.5 shadow-2xs flex items-center justify-between">
+                <div>
+                  <h3 className="text-base font-bold text-slate-900 flex items-center gap-2">
+                    <Building2 className="w-5 h-5 text-emerald-800" />
+                    <span>Safaricom PLC Incident &amp; Network Response Teams</span>
+                  </h3>
+                  <p className="text-xs text-slate-500 mt-0.5">
+                    7 Specialized Technical &amp; Operational Units Connected for automated dispatch and field mobilization.
+                  </p>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3.5">
+                {KENYAN_RESPONSE_TEAMS.map((team) => {
+                  const teamActiveAssigned = submissions.filter(
+                    (s) => s.assignedTeam === team.name
+                  ).length;
+
+                  return (
+                    <div
+                      key={team.id}
+                      className="bg-white border border-slate-200 rounded-xl p-4.5 space-y-3 hover:border-emerald-600 transition-colors shadow-2xs"
+                    >
+                      <div className="flex items-start justify-between gap-2">
+                        <div>
+                          <p className="text-sm font-bold text-slate-900 leading-snug">
+                            {team.name}
+                          </p>
+                          <span className="text-[11px] text-emerald-700 font-medium">
+                            {team.department}
+                          </span>
+                        </div>
+                        <span className="text-[10px] font-mono px-2 py-0.5 bg-slate-100 text-slate-700 rounded font-semibold shrink-0">
+                          {team.shortCode}
+                        </span>
+                      </div>
+
+                      <div className="text-xs text-slate-600 space-y-1 bg-slate-50 p-2.5 rounded-lg border border-slate-100">
+                        <p className="font-semibold text-slate-800">Lead: {team.leadOfficer}</p>
+                        <p className="text-slate-500 font-mono text-[11px]">Email: {team.email}</p>
+                        <p className="flex items-center gap-1 font-mono text-slate-500 text-[11px]">
+                          <Phone className="w-3 h-3 text-slate-400" />
+                          <span>{team.phone}</span>
+                        </p>
+                      </div>
+
+                      <div className="pt-2 border-t border-slate-100 flex items-center justify-between text-xs">
+                        <div>
+                          <span className="text-slate-500 text-2xs block">Active Queue</span>
+                          <span className="font-mono font-bold text-emerald-800 text-base">
+                            {teamActiveAssigned} cases
+                          </span>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setSelectedTeamFilter(team.name);
+                            navigateTo('incidents');
+                          }}
+                          className="px-3 py-1.5 bg-emerald-50 text-emerald-800 hover:bg-emerald-100 font-semibold rounded-lg text-xs cursor-pointer"
+                        >
+                          View Queue &rarr;
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          {/* ================= PAGE 6: ANALYTICS & AI INSIGHTS ================= */}
+          {currentPage === 'analytics' && (
+            <div className="space-y-5 animate-in fade-in duration-150">
+              <div className="bg-white border border-slate-200 rounded-xl p-4.5 shadow-2xs flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                <div>
+                  <h3 className="text-base font-bold text-slate-900 flex items-center gap-2">
+                    <PieChartIcon className="w-5 h-5 text-emerald-800" />
+                    <span>Incident Distribution &amp; Operational Analytics</span>
+                  </h3>
+                  <p className="text-xs text-slate-500 mt-0.5">
+                    Category density and automated strategic directives across Kenyan counties.
+                  </p>
+                </div>
+
                 <button
                   type="button"
-                  onClick={() => setInspectingReport(null)}
-                  className="px-4 py-2 text-xs font-semibold text-slate-600 hover:text-slate-900 cursor-pointer"
+                  onClick={handleCompileAIAnalytics}
+                  disabled={isCompilingAI}
+                  className="inline-flex items-center gap-2 px-3.5 py-1.5 text-xs font-semibold text-emerald-900 bg-white hover:bg-emerald-50 border border-emerald-300 rounded-lg shadow-2xs transition-colors cursor-pointer self-start sm:self-auto"
                 >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  disabled={isSavingDispatch}
-                  className="inline-flex items-center gap-2 px-5 py-2 text-xs font-semibold text-white bg-emerald-700 hover:bg-emerald-800 rounded-lg shadow-xs transition-colors cursor-pointer"
-                >
-                  {isSavingDispatch ? (
+                  {isCompilingAI ? (
                     <>
-                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                      <span>Saving Dispatch...</span>
+                      <Loader2 className="w-3.5 h-3.5 animate-spin text-emerald-700" />
+                      <span>Compiling Analytics...</span>
                     </>
                   ) : (
                     <>
-                      <Send className="w-3.5 h-3.5" />
-                      <span>Confirm &amp; Dispatch to Team</span>
+                      <RefreshCw className="w-3.5 h-3.5 text-emerald-700" />
+                      <span>Re-compile Analytics</span>
                     </>
                   )}
                 </button>
               </div>
-            </form>
+
+              {/* Main Grid: Pie Chart + AI Synthesis */}
+              <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-stretch">
+                {/* Left 5 Cols: Interactive SVG Donut/Pie Chart */}
+                <div className="lg:col-span-5 bg-white border border-slate-200 rounded-xl p-4.5 shadow-2xs flex flex-col justify-between gap-4">
+                  <div>
+                    <div className="flex items-center justify-between pb-2.5 border-b border-slate-100">
+                      <h4 className="text-xs font-bold uppercase tracking-wider text-slate-700 flex items-center gap-1.5">
+                        <BarChart3 className="w-3.5 h-3.5 text-emerald-700" />
+                        <span>Issues by Domain (Pie Chart)</span>
+                      </h4>
+                      <span className="text-xs font-semibold text-slate-500 font-mono">
+                        {pieChartData.total} Total Reports
+                      </span>
+                    </div>
+
+                    <div className="flex items-center justify-center pt-3 pb-1">
+                      <div className="relative w-52 h-52 flex items-center justify-center">
+                        <svg viewBox="0 0 200 200" className="w-full h-full transform -rotate-90">
+                          {pieChartData.slices.map((slice, idx) => {
+                            const isHovered = activeHoveredCategory === slice.category;
+                            return (
+                              <path
+                                key={idx}
+                                d={slice.pathData}
+                                fill={slice.fill}
+                                stroke="#ffffff"
+                                strokeWidth={isHovered ? '3' : '1.5'}
+                                className="transition-all duration-150 cursor-pointer hover:opacity-90"
+                                style={{
+                                  transformOrigin: '100px 100px',
+                                  transform: isHovered ? 'scale(1.04)' : 'scale(1)',
+                                }}
+                                onMouseEnter={() => setActiveHoveredCategory(slice.category)}
+                                onMouseLeave={() => setActiveHoveredCategory(null)}
+                              />
+                            );
+                          })}
+                        </svg>
+
+                        <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none text-center px-4">
+                          {activeHoveredCategory ? (
+                            (() => {
+                              const matched = pieChartData.items.find(
+                                (i) => i.category === activeHoveredCategory
+                              );
+                              return (
+                                <>
+                                  <span className="text-2xl font-black text-slate-900 tracking-tight">
+                                    {matched?.percentage}%
+                                  </span>
+                                  <span className="text-2xs font-semibold text-slate-600 line-clamp-1 max-w-[110px]">
+                                    {matched?.category}
+                                  </span>
+                                  <span className="text-2xs font-mono text-emerald-800">
+                                    {matched?.count} incidents
+                                  </span>
+                                </>
+                              );
+                            })()
+                          ) : (
+                            <>
+                              <span className="text-3xl font-black text-slate-900 tracking-tight">
+                                {pieChartData.total}
+                              </span>
+                              <span className="text-2xs font-bold uppercase tracking-wider text-slate-400">
+                                Incidents
+                              </span>
+                              <span className="text-2xs text-emerald-700 font-medium">
+                                {pieChartData.items.length} Domains
+                              </span>
+                            </>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Category Legend & Breakdown List */}
+                  <div className="space-y-1.5 pt-2 border-t border-slate-100 max-h-48 overflow-y-auto pr-1">
+                    {pieChartData.items.map((item) => {
+                      const isHovered = activeHoveredCategory === item.category;
+                      return (
+                        <div
+                          key={item.category}
+                          onMouseEnter={() => setActiveHoveredCategory(item.category)}
+                          onMouseLeave={() => setActiveHoveredCategory(null)}
+                          className={`flex items-center justify-between px-2 py-1 rounded-lg text-xs transition-colors cursor-pointer ${
+                            isHovered ? 'bg-slate-100 font-semibold' : 'hover:bg-slate-50'
+                          }`}
+                        >
+                          <div className="flex items-center gap-2 min-w-0">
+                            <span
+                              className="w-2.5 h-2.5 rounded-full shrink-0"
+                              style={{ backgroundColor: item.fill }}
+                            />
+                            <span className="text-slate-800 truncate">{item.category}</span>
+                          </div>
+                          <div className="flex items-center gap-2 shrink-0 font-mono">
+                            <span className="text-slate-500 font-medium">{item.count}</span>
+                            <span className={`px-1.5 py-0.5 rounded text-2xs font-bold ${item.bg} ${item.text}`}>
+                              {item.percentage}%
+                            </span>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                {/* Right 7 Cols: Executive Synthesis */}
+                <div className="lg:col-span-7 bg-white border border-slate-200 rounded-xl p-5 shadow-2xs flex flex-col justify-between gap-4">
+                  <div className="space-y-4">
+                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-2.5 border-b border-slate-100">
+                      <div className="flex items-center gap-2">
+                        <span className="p-1 bg-amber-100/80 text-amber-800 rounded-md">
+                          <Sparkles className="w-3.5 h-3.5 text-amber-700" />
+                        </span>
+                        <h4 className="text-xs font-bold uppercase tracking-wider text-slate-800">
+                          Incident Data Analysis &amp; Operational Brief
+                        </h4>
+                      </div>
+
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (!aiAnalyticsData) return;
+                          const textToCopy = `SEMA Incident Analysis:\n${aiAnalyticsData.executiveSummary}\n\nKey Strategic Directives:\n${aiAnalyticsData.recommendations.map((r, i) => `${i + 1}. ${r}`).join('\n')}`;
+                          navigator.clipboard.writeText(textToCopy).then(() => {
+                            setHasCopiedBrief(true);
+                            setTimeout(() => setHasCopiedBrief(false), 2000);
+                          });
+                        }}
+                        className="inline-flex items-center gap-1 text-xs text-slate-600 hover:text-emerald-800 transition-colors font-medium cursor-pointer self-start sm:self-auto"
+                      >
+                        {hasCopiedBrief ? (
+                          <>
+                            <Check className="w-3.5 h-3.5 text-emerald-700" />
+                            <span className="text-emerald-700 font-semibold">Brief Copied!</span>
+                          </>
+                        ) : (
+                          <>
+                            <Copy className="w-3.5 h-3.5 text-slate-400" />
+                            <span>Copy Brief</span>
+                          </>
+                        )}
+                      </button>
+                    </div>
+
+                    {/* AI Executive Summary Card */}
+                    <div className="bg-emerald-50/70 border border-emerald-900/12 rounded-xl p-3.5 space-y-2">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-xs font-bold text-emerald-950 flex items-center gap-1.5">
+                          <TrendingUp className="w-3.5 h-3.5 text-emerald-700" />
+                          <span>Executive Incident Synthesis</span>
+                        </span>
+                        <span className="text-2xs font-bold uppercase tracking-wider px-2 py-0.5 rounded bg-emerald-200/60 text-emerald-900">
+                          Operational Brief
+                        </span>
+                      </div>
+                      <p className="text-xs text-slate-800 leading-relaxed font-normal">
+                        {aiAnalyticsData?.executiveSummary ||
+                          'Compiling incident data from customer submissions across Kenya...'}
+                      </p>
+                    </div>
+
+                    {/* Fast Metric Quick-Cards */}
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+                      <div className="p-2.5 bg-slate-50 border border-slate-200/80 rounded-lg">
+                        <span className="text-2xs font-medium text-slate-500 uppercase tracking-wider block">
+                          Primary Concentration
+                        </span>
+                        <p className="text-sm font-bold text-slate-900 mt-0.5 truncate">
+                          {pieChartData.items[0]?.category || 'Home Fibre & Fixed Internet'}
+                        </p>
+                        <span className="text-2xs text-emerald-800 font-semibold">
+                          {pieChartData.items[0]?.percentage || 0}% of volume
+                        </span>
+                      </div>
+
+                      <div className="p-2.5 bg-red-50/60 border border-red-200/80 rounded-lg">
+                        <span className="text-2xs font-medium text-red-700 uppercase tracking-wider block flex items-center gap-1">
+                          <AlertTriangle className="w-3 h-3 text-red-600" />
+                          Urgent Severity
+                        </span>
+                        <p className="text-sm font-bold text-red-900 mt-0.5">
+                          {metrics.urgentCount} Incidents
+                        </p>
+                        <span className="text-2xs text-red-700">Immediate outage</span>
+                      </div>
+
+                      <div className="p-2.5 bg-cyan-50/60 border border-cyan-200/80 rounded-lg">
+                        <span className="text-2xs font-medium text-cyan-800 uppercase tracking-wider block">
+                          SLA Compliance
+                        </span>
+                        <p className="text-sm font-bold text-cyan-950 mt-0.5">94.2% on Track</p>
+                        <span className="text-2xs text-cyan-800 font-medium">Avg turnaround: 2.4h</span>
+                      </div>
+                    </div>
+
+                    {/* Action Directives */}
+                    <div className="space-y-2 pt-1">
+                      <h5 className="text-xs font-bold text-slate-800 flex items-center gap-1.5">
+                        <ShieldAlert className="w-3.5 h-3.5 text-emerald-700" />
+                        <span>Recommended Operational Directives</span>
+                      </h5>
+                      <div className="space-y-1.5">
+                        {(aiAnalyticsData?.recommendations || [
+                          'Pre-deploy metro fiber splicing teams along heavily reported arterial corridors.',
+                          'Audit M-PESA B2B callback reconciliation to achieve 30-minute SLA.',
+                          'Maintain multilingual notifications in Kiswahili and Sheng to keep customers updated.',
+                        ]).map((rec, i) => (
+                          <div
+                            key={i}
+                            className="flex items-start gap-2 p-2 bg-slate-50 border border-slate-200/70 rounded-lg text-xs text-slate-700"
+                          >
+                            <span className="flex items-center justify-center w-4 h-4 rounded-full bg-emerald-700 text-white font-bold text-2xs shrink-0 mt-0.5">
+                              {i + 1}
+                            </span>
+                            <span className="leading-snug">{rec}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* ================= PAGE 7: ALERTS ================= */}
+          {currentPage === 'alerts' && (
+            <div className="space-y-5 animate-in fade-in duration-150">
+              {/* Alerts Tabs: Officer alerts / Customer alerts */}
+              <div className="bg-white border border-slate-200 rounded-xl p-3.5 shadow-2xs flex flex-wrap items-center justify-between gap-4">
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setAlertsTab('officer')}
+                    className={`px-3.5 py-1.5 rounded-xl text-xs font-bold transition-all flex items-center gap-2 cursor-pointer border ${
+                      alertsTab === 'officer'
+                        ? 'bg-emerald-700 text-white border-emerald-700 shadow-2xs'
+                        : 'bg-slate-50 text-slate-700 border-slate-200 hover:bg-slate-100'
+                    }`}
+                  >
+                    <MailCheck className="w-4 h-4" />
+                    <span>Officer alerts</span>
+                    <span
+                      className={`px-2 py-0.5 rounded-full text-2xs font-mono font-bold ${
+                        alertsTab === 'officer' ? 'bg-white text-emerald-950' : 'bg-slate-200 text-slate-700'
+                      }`}
+                    >
+                      {metrics.emailAlertsSent}
+                    </span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setAlertsTab('customer')}
+                    className={`px-3.5 py-1.5 rounded-xl text-xs font-semibold transition-all flex items-center gap-2 cursor-pointer border ${
+                      alertsTab === 'customer'
+                        ? 'bg-emerald-700 text-white border-emerald-700 shadow-2xs'
+                        : 'bg-slate-50 text-slate-700 border-slate-200 hover:bg-slate-100'
+                    }`}
+                  >
+                    <MessageSquare className="w-4 h-4" />
+                    <span>Customer alerts</span>
+                    <span className="text-[10px] px-2 py-0.5 rounded-full bg-slate-200 text-slate-600 font-medium">
+                      Coming Soon
+                    </span>
+                  </button>
+                </div>
+
+                <div className="text-xs text-slate-500 font-medium">
+                  {alertsTab === 'officer'
+                    ? `${metrics.emailAlertsSent} automated email alerts delivered to technical leads`
+                    : 'Customer broadcast & resolution notifications desk'}
+                </div>
+              </div>
+
+              {alertsTab === 'officer' ? (
+                /* Dispatched Email Logs Table */
+                <div className="bg-white border border-slate-200 rounded-xl shadow-2xs overflow-hidden space-y-0">
+                  <div className="px-4 py-3 border-b border-slate-200 flex items-center justify-between">
+                    <span className="text-xs font-bold text-slate-700 uppercase tracking-wider">
+                      Automated Officer Email Dispatch Registry ({metrics.emailAlertsSent})
+                    </span>
+                    <span className="text-2xs text-slate-500 font-mono">
+                      Gateway: dispatch@safaricom.co.ke
+                    </span>
+                  </div>
+
+                  {submissions.filter((s) => s.emailAlertSent).length === 0 ? (
+                    <div className="p-12 text-center space-y-2">
+                      <Mail className="w-8 h-8 text-slate-300 mx-auto" />
+                      <p className="text-xs font-semibold text-slate-700">No email alerts dispatched yet</p>
+                      <p className="text-2xs text-slate-400">
+                        Use Auto-Assign or open Dispatch Details on any incident to send alerts to officers.
+                      </p>
+                    </div>
+                  ) : (
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-left text-xs">
+                        <thead className="bg-slate-50 text-slate-600 uppercase text-2xs font-semibold border-b border-slate-200">
+                          <tr>
+                            <th className="py-2.5 px-3">Reference &amp; Time</th>
+                            <th className="py-2.5 px-3">Assigned Officer</th>
+                            <th className="py-2.5 px-3">Response Team</th>
+                            <th className="py-2.5 px-3">Status</th>
+                            <th className="py-2.5 px-3 text-right">Action</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-100">
+                          {submissions
+                            .filter((s) => s.emailAlertSent)
+                            .map((report) => (
+                              <tr key={report.id} className="hover:bg-slate-50 transition-colors">
+                                <td className="py-2.5 px-3">
+                                  <span className="font-mono font-bold text-emerald-800 block">
+                                    {report.referenceCode}
+                                  </span>
+                                  <span className="text-2xs text-slate-400 font-mono">
+                                    {report.emailAlertSentAt
+                                      ? new Date(report.emailAlertSentAt).toLocaleTimeString([], {
+                                          hour: '2-digit',
+                                          minute: '2-digit',
+                                        })
+                                      : 'Recent'}{' '}
+                                    EAT
+                                  </span>
+                                </td>
+
+                                <td className="py-2.5 px-3">
+                                  <span className="font-medium text-slate-900 block">
+                                    {report.assignedOfficer || 'Field Officer'}
+                                  </span>
+                                  <span className="text-2xs text-slate-500 font-mono truncate max-w-[180px] block">
+                                    {report.assignedOfficerEmail ||
+                                      report.emailAlertRecipient ||
+                                      'officer@safaricom.co.ke'}
+                                  </span>
+                                </td>
+
+                                <td className="py-2.5 px-3 text-slate-700 font-medium">
+                                  {report.assignedTeam || 'Safaricom Response Unit'}
+                                </td>
+
+                                <td className="py-2.5 px-3">
+                                  <span className="inline-flex items-center gap-1 text-2xs font-semibold text-emerald-800 bg-emerald-50 px-2.5 py-0.5 rounded-full border border-emerald-200">
+                                    <CheckCircle2 className="w-3 h-3 text-emerald-600" />
+                                    <span>Delivered</span>
+                                  </span>
+                                </td>
+
+                                <td className="py-2.5 px-3 text-right">
+                                  <button
+                                    type="button"
+                                    onClick={() => setInspectingEmailAlert(report)}
+                                    className="inline-flex items-center gap-1 px-2.5 py-1 bg-emerald-50 text-emerald-800 hover:bg-emerald-100 rounded-lg text-xs font-semibold cursor-pointer"
+                                  >
+                                    <Eye className="w-3.5 h-3.5" />
+                                    <span>View Memo</span>
+                                  </button>
+                                </td>
+                              </tr>
+                            ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </div>
+              ) : (
+                /* Customer Alerts Tab */
+                <div className="bg-white border border-slate-200 rounded-xl p-12 text-center space-y-3 shadow-2xs">
+                  <div className="w-12 h-12 rounded-full bg-emerald-50 text-emerald-700 flex items-center justify-center mx-auto">
+                    <MessageSquare className="w-6 h-6" />
+                  </div>
+                  <h4 className="text-base font-bold text-slate-900">Customer Broadcast Alerts</h4>
+                  <p className="text-xs text-slate-500 max-w-md mx-auto">
+                    Automated SMS and WhatsApp updates to subscribers regarding incident milestones, scheduled maintenance, and resolution confirmations will be managed here.
+                  </p>
+                  <span className="inline-block px-3 py-1 rounded-full text-xs font-semibold bg-emerald-100 text-emerald-800">
+                    Feature in rollout queue
+                  </span>
+                </div>
+              )}
+            </div>
+          )}
+        </main>
+      </div>
+
+      {/* ================= RIGHT-SIDE DETAIL PANEL FOR INCIDENTS ================= */}
+      {inspectingReport && (
+        <div className="fixed inset-0 z-50 overflow-hidden">
+          {/* Backdrop */}
+          <div
+            className="absolute inset-0 bg-slate-900/50 backdrop-blur-xs transition-opacity"
+            onClick={() => setInspectingReport(null)}
+          />
+
+          <div className="fixed inset-y-0 right-0 max-w-full flex pl-10">
+            <div className="w-screen max-w-xl bg-white shadow-2xl flex flex-col border-l border-slate-200 animate-in slide-in-from-right duration-200">
+              {/* Header */}
+              <div className="px-6 py-4 bg-slate-50 border-b border-slate-200 flex items-center justify-between">
+                <div>
+                  <div className="flex items-center gap-2">
+                    <span className="font-mono font-bold text-emerald-800 text-sm">
+                      {inspectingReport.referenceCode}
+                    </span>
+                    <span
+                      className={`text-2xs font-bold uppercase tracking-wider px-2 py-0.5 rounded ${
+                        inspectingReport.priority === 'Urgent'
+                          ? 'bg-red-100 text-red-800'
+                          : inspectingReport.priority === 'High'
+                          ? 'bg-amber-100 text-amber-800'
+                          : 'bg-slate-200 text-slate-700'
+                      }`}
+                    >
+                      {inspectingReport.priority || 'Medium'} Priority
+                    </span>
+                  </div>
+                  <h3 className="text-base font-bold text-slate-900 mt-0.5">
+                    Incident Details &amp; Dispatch
+                  </h3>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => setInspectingReport(null)}
+                  className="p-1.5 text-slate-400 hover:text-slate-700 hover:bg-slate-200 rounded-lg transition-colors cursor-pointer"
+                  aria-label="Close detail panel"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+
+              {/* Panel Scrollable Body */}
+              <div className="p-6 overflow-y-auto space-y-4 flex-1">
+                {/* Safety Rule Banner */}
+                {inspectingReport.needsReview && (
+                  <div className="bg-amber-50 border border-amber-300 rounded-xl p-3.5 flex items-start gap-3 text-xs text-amber-950 shadow-2xs">
+                    <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+                    <div className="space-y-1">
+                      <span className="font-bold text-amber-900 block">Safety Rule: Flagged for Manual Review</span>
+                      <p className="text-amber-800 leading-relaxed">
+                        {inspectingReport.adminNotes ||
+                          'This incident was held in Received queue for manual triage because the AI confidence score is below 60% or the category is undetermined.'}
+                      </p>
+                    </div>
+                  </div>
+                )}
+
+                {/* SLA Clock Started Indicator */}
+                {inspectingReport.slaStartedAt && inspectingReport.status === 'Assigned' && (
+                  <div className="bg-indigo-50 border border-indigo-200 rounded-xl p-3 flex items-center justify-between text-xs text-indigo-950 font-mono">
+                    <div className="flex items-center gap-2">
+                      <Clock className="w-4 h-4 text-indigo-600 shrink-0" />
+                      <span>
+                        SLA Timer Active (Clock started at{' '}
+                        {new Date(inspectingReport.slaStartedAt).toLocaleTimeString([], {
+                          hour: '2-digit',
+                          minute: '2-digit',
+                          second: '2-digit',
+                        })}
+                        )
+                      </span>
+                    </div>
+                    <span className="text-[11px] font-bold text-indigo-700 bg-white px-2 py-0.5 rounded border border-indigo-200">
+                      Target: {inspectingReport.aiClassification?.estimatedSLA || '2 hours'}
+                    </span>
+                  </div>
+                )}
+
+                {/* 1. Customer Incident Report Statement & Translation */}
+                <div className="bg-slate-50 border border-slate-200 rounded-xl p-4 space-y-2">
+                  <div className="flex items-center justify-between text-xs text-slate-500">
+                    <span className="font-semibold text-slate-700">Customer Statement:</span>
+                    <div className="flex items-center gap-1.5">
+                      {renderChannelBadge(inspectingReport.channel, inspectingReport.captureMethod)}
+                      <span>·</span>
+                      <span className="font-semibold">{inspectingReport.detectedLanguage}</span>
+                    </div>
+                  </div>
+                  <p className="text-xs font-medium text-slate-900 leading-relaxed bg-white p-3 rounded-lg border border-slate-200/80">
+                    &ldquo;{inspectingReport.text}&rdquo;
+                  </p>
+                  {inspectingReport.englishTranslation && (
+                    <div className="p-2.5 bg-emerald-50/50 border border-emerald-200/60 rounded-lg">
+                      <span className="text-2xs font-bold uppercase tracking-wider text-emerald-800 block">
+                        English Translation:
+                      </span>
+                      <p className="text-xs text-slate-700 italic mt-0.5">
+                        &ldquo;{inspectingReport.englishTranslation}&rdquo;
+                      </p>
+                    </div>
+                  )}
+                  {inspectingReport.contactInfo && (
+                    <p className="text-xs text-emerald-900 font-mono pt-1">
+                      Customer Line / Contact: {inspectingReport.contactInfo}
+                    </p>
+                  )}
+                </div>
+
+                {/* 2. AI Incident Classification */}
+                {inspectingReport.aiClassification && (
+                  <div className="bg-emerald-50/70 border border-emerald-200 rounded-xl p-4 space-y-2 text-xs">
+                    <div className="flex items-center justify-between text-emerald-950 font-bold">
+                      <span className="flex items-center gap-1.5">
+                        <Sparkles className="w-4 h-4 text-emerald-700" />
+                        <span>Incident Classification</span>
+                      </span>
+                      <span className="font-mono text-emerald-800">
+                        Target SLA: {inspectingReport.aiClassification.estimatedSLA}
+                      </span>
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-3 pt-1">
+                      <div>
+                        <span className="text-slate-500 text-2xs block">Domain:</span>
+                        <p className="font-semibold text-slate-900">
+                          {inspectingReport.aiClassification.category}
+                        </p>
+                      </div>
+                      <div>
+                        <span className="text-slate-500 text-2xs block">Urgency Assessment:</span>
+                        <p className="font-semibold text-red-700">
+                          {inspectingReport.aiClassification.urgency}
+                        </p>
+                      </div>
+                      {inspectingReport.aiClassification.confidenceScore !== undefined && (
+                        <div>
+                          <span className="text-slate-500 text-2xs block">AI Confidence Score:</span>
+                          <p
+                            className={`font-semibold font-mono ${
+                              inspectingReport.aiClassification.confidenceScore >= 0.6
+                                ? 'text-emerald-700'
+                                : 'text-amber-700 font-bold'
+                            }`}
+                          >
+                            {Math.round(inspectingReport.aiClassification.confidenceScore * 100)}%
+                            {inspectingReport.aiClassification.confidenceScore < 0.6 && ' (Needs Review)'}
+                          </p>
+                        </div>
+                      )}
+                      <div>
+                        <span className="text-slate-500 text-2xs block">Assigned Response Unit:</span>
+                        <p className="font-semibold text-slate-900 truncate">
+                          {inspectingReport.assignedTeam || 'Unassigned (Awaiting Triage)'}
+                        </p>
+                      </div>
+                    </div>
+
+                    <div className="text-slate-700 pt-1 border-t border-emerald-200/60">
+                      <strong className="text-slate-900">Routing Rationale: </strong>
+                      {inspectingReport.aiClassification.rationale}
+                    </div>
+
+                    {inspectingReport.aiClassification.tensionNotes && (
+                      <p className="text-2xs text-slate-500 italic">
+                        Note: {inspectingReport.aiClassification.tensionNotes}
+                      </p>
+                    )}
+                  </div>
+                )}
+
+                {/* 3. Informed Resolution Steps */}
+                {inspectingReport.aiResolutionSteps && inspectingReport.aiResolutionSteps.length > 0 && (
+                  <div className="bg-white border border-slate-200 rounded-xl p-4 space-y-2 text-xs">
+                    <div className="flex items-center justify-between">
+                      <span className="font-bold text-slate-900 flex items-center gap-1.5">
+                        <ShieldAlert className="w-4 h-4 text-emerald-700" />
+                        <span>Informed Resolution Steps</span>
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const stepsText = inspectingReport.aiResolutionSteps?.join('\n') || '';
+                          navigator.clipboard.writeText(stepsText).then(() => {
+                            setCopiedStepsTicket(inspectingReport.id);
+                            setTimeout(() => setCopiedStepsTicket(null), 2000);
+                          });
+                        }}
+                        className="text-2xs text-emerald-700 hover:text-emerald-950 font-semibold underline cursor-pointer"
+                      >
+                        {copiedStepsTicket === inspectingReport.id ? 'Copied Steps!' : 'Copy Steps'}
+                      </button>
+                    </div>
+
+                    <div className="space-y-1.5 pt-1">
+                      {inspectingReport.aiResolutionSteps.map((step, idx) => (
+                        <div key={idx} className="flex items-start gap-2 p-2 bg-slate-50 rounded-lg text-slate-800">
+                          <span className="w-4 h-4 rounded-full bg-emerald-700 text-white font-bold text-2xs flex items-center justify-center shrink-0 mt-0.5">
+                            {idx + 1}
+                          </span>
+                          <span className="leading-snug">{step}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* 4. Team Assignment & Dispatch Form */}
+                <form onSubmit={handleSaveDispatch} className="space-y-3.5 pt-2 border-t border-slate-200">
+                  <h4 className="text-xs font-bold uppercase tracking-wider text-slate-700">
+                    Dispatch &amp; Team Assignment
+                  </h4>
+
+                  <div className="space-y-3">
+                    <div>
+                      <label htmlFor="dispatch-team" className="block text-xs font-medium text-slate-700 mb-1">
+                        Assigned Response Team
+                      </label>
+                      <select
+                        id="dispatch-team"
+                        value={dispatchTeam}
+                        onChange={(e) => handleTeamChange(e.target.value)}
+                        className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-lg text-slate-900 font-medium focus:outline-none focus:border-emerald-600 cursor-pointer"
+                      >
+                        {KENYAN_RESPONSE_TEAMS.map((team) => (
+                          <option key={team.id} value={team.name}>
+                            {team.name}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      <div>
+                        <label htmlFor="dispatch-officer" className="block text-xs font-medium text-slate-700 mb-1">
+                          Lead Assigned Officer
+                        </label>
+                        <input
+                          id="dispatch-officer"
+                          type="text"
+                          value={dispatchOfficer}
+                          onChange={(e) => setDispatchOfficer(e.target.value)}
+                          className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-lg text-slate-900 focus:outline-none focus:border-emerald-600"
+                        />
+                      </div>
+
+                      <div>
+                        <label htmlFor="dispatch-email" className="block text-xs font-medium text-slate-700 mb-1">
+                          Officer Email
+                        </label>
+                        <input
+                          id="dispatch-email"
+                          type="email"
+                          value={dispatchOfficerEmail}
+                          onChange={(e) => setDispatchOfficerEmail(e.target.value)}
+                          className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-lg text-slate-900 font-mono focus:outline-none focus:border-emerald-600"
+                        />
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      <div>
+                        <label htmlFor="dispatch-priority" className="block text-xs font-medium text-slate-700 mb-1">
+                          Priority &amp; Urgency
+                        </label>
+                        <select
+                          id="dispatch-priority"
+                          value={dispatchPriority}
+                          onChange={(e) => setDispatchPriority(e.target.value as PriorityLevel)}
+                          className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-lg text-slate-900 focus:outline-none focus:border-emerald-600 cursor-pointer"
+                        >
+                          <option value="Urgent">Urgent (Immediate Danger / Outage)</option>
+                          <option value="High">High Priority (Active Disruption)</option>
+                          <option value="Medium">Medium (Standard Issue)</option>
+                          <option value="Routine">Routine (Inquiry / Scheduled)</option>
+                        </select>
+                      </div>
+
+                      <div>
+                        <label htmlFor="dispatch-status" className="block text-xs font-medium text-slate-700 mb-1">
+                          Dispatch Status
+                        </label>
+                        <select
+                          id="dispatch-status"
+                          value={dispatchStatus}
+                          onChange={(e) => setDispatchStatus(e.target.value as ReportStatus)}
+                          className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-lg text-slate-900 focus:outline-none focus:border-emerald-600 cursor-pointer"
+                        >
+                          <option value="Assigned">Assigned to Unit</option>
+                          <option value="In Progress">In Progress / Field Dispatched</option>
+                          <option value="Resolved">Resolved</option>
+                          <option value="Closed">Closed</option>
+                        </select>
+                      </div>
+                    </div>
+
+                    <div>
+                      <label htmlFor="dispatch-notes" className="block text-xs font-medium text-slate-700 mb-1">
+                        Dispatch Notes / Field Instructions
+                      </label>
+                      <textarea
+                        id="dispatch-notes"
+                        rows={2}
+                        value={dispatchNotes}
+                        onChange={(e) => setDispatchNotes(e.target.value)}
+                        placeholder="e.g. Field crew instructed to bring OTDR splicing kit..."
+                        className="w-full p-2.5 text-xs bg-slate-50 border border-slate-200 rounded-lg text-slate-900 focus:outline-none focus:border-emerald-600"
+                      />
+                    </div>
+
+                    {/* Email Option Checkbox */}
+                    <div className="bg-emerald-50/70 border border-emerald-200 rounded-xl p-3 space-y-2">
+                      <div className="flex items-center justify-between">
+                        <label className="flex items-center gap-2 cursor-pointer select-none">
+                          <input
+                            type="checkbox"
+                            checked={sendAutomatedEmail}
+                            onChange={(e) => setSendAutomatedEmail(e.target.checked)}
+                            className="w-4 h-4 rounded text-emerald-700 focus:ring-emerald-600 border-slate-300 cursor-pointer"
+                          />
+                          <span className="text-xs font-semibold text-emerald-950 flex items-center gap-1.5">
+                            <MailCheck className="w-4 h-4 text-emerald-700" />
+                            <span>Send automated email alert to officer</span>
+                          </span>
+                        </label>
+
+                        {sendAutomatedEmail && (
+                          <button
+                            type="button"
+                            onClick={() => setShowEmailPreview(!showEmailPreview)}
+                            className="text-[11px] font-semibold text-emerald-800 hover:text-emerald-950 underline cursor-pointer"
+                          >
+                            {showEmailPreview ? 'Hide Preview' : 'Preview Email'}
+                          </button>
+                        )}
+                      </div>
+
+                      {sendAutomatedEmail && showEmailPreview && (
+                        <div className="bg-white border border-emerald-300 rounded-lg p-3 text-[11px] font-mono text-slate-800 max-h-40 overflow-y-auto">
+                          <pre className="whitespace-pre-wrap">
+                            {generateClientEmailAlert(
+                              inspectingReport,
+                              dispatchOfficer,
+                              dispatchOfficerEmail,
+                              dispatchTeam,
+                              dispatchPriority,
+                              dispatchNotes
+                            ).body}
+                          </pre>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Actions Bar */}
+                  <div className="flex items-center justify-between gap-3 pt-3 border-t border-slate-200">
+                    <button
+                      type="button"
+                      onClick={() => setInspectingEmailAlert(inspectingReport)}
+                      className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors cursor-pointer"
+                    >
+                      <Eye className="w-3.5 h-3.5" />
+                      <span>View Email Notice</span>
+                    </button>
+
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setInspectingReport(null)}
+                        className="px-3.5 py-2 text-xs font-semibold text-slate-600 hover:text-slate-900 cursor-pointer"
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        type="submit"
+                        disabled={isSavingDispatch}
+                        className="inline-flex items-center gap-2 px-5 py-2 text-xs font-semibold text-white bg-emerald-700 hover:bg-emerald-800 rounded-lg shadow-xs transition-colors cursor-pointer"
+                      >
+                        {isSavingDispatch ? (
+                          <>
+                            <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                            <span>Saving...</span>
+                          </>
+                        ) : (
+                          <>
+                            <Send className="w-3.5 h-3.5" />
+                            <span>Confirm &amp; Dispatch</span>
+                          </>
+                        )}
+                      </button>
+                    </div>
+                  </div>
+                </form>
+              </div>
+            </div>
           </div>
         </div>
       )}
 
-      {/* Single Email Alert Inspection Modal */}
+      {/* ================= EMAIL ALERT VIEW MODAL ================= */}
       {inspectingEmailAlert && (
         <div
           className="fixed inset-0 z-50 bg-slate-950/60 backdrop-blur-xs flex items-center justify-center p-4"
           role="dialog"
           aria-modal="true"
-          aria-labelledby="email-alert-title"
         >
-          <div className="bg-white border border-slate-200 rounded-2xl max-w-2xl w-full p-6 space-y-4 shadow-2xl max-h-[90vh] overflow-y-auto">
+          <div className="bg-white border border-slate-200 rounded-2xl max-w-2xl w-full p-6 space-y-4 shadow-2xl max-h-[90vh] overflow-y-auto animate-in fade-in zoom-in-95 duration-150">
             {/* Header */}
             <div className="flex items-start justify-between gap-4 border-b border-slate-100 pb-3">
               <div className="flex items-center gap-2.5">
@@ -2754,10 +3955,10 @@ Automated alert dispatched by Safaricom SEMA Intelligent NOC Operations.
                       {inspectingEmailAlert.referenceCode}
                     </span>
                     <span className="text-2xs font-bold uppercase tracking-wider px-2 py-0.5 rounded bg-emerald-100 text-emerald-900">
-                      Automated Alert Delivered
+                      Alert Delivered
                     </span>
                   </div>
-                  <h3 id="email-alert-title" className="text-base font-bold text-slate-900 mt-0.5">
+                  <h3 className="text-base font-bold text-slate-900 mt-0.5">
                     Officer Dispatch Email Notice
                   </h3>
                 </div>
@@ -2772,7 +3973,7 @@ Automated alert dispatched by Safaricom SEMA Intelligent NOC Operations.
               </button>
             </div>
 
-            {/* Email Metadata Header Bar */}
+            {/* Email Metadata */}
             <div className="bg-slate-50 border border-slate-200 rounded-xl p-3.5 space-y-2 text-xs">
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-slate-600">
                 <div>
@@ -2782,21 +3983,21 @@ Automated alert dispatched by Safaricom SEMA Intelligent NOC Operations.
                   </strong>
                 </div>
                 <div>
-                  <span className="text-slate-400">Official Email:</span>{' '}
+                  <span className="text-slate-400">Email:</span>{' '}
                   <strong className="font-mono text-emerald-900">
                     {inspectingEmailAlert.assignedOfficerEmail ||
                       inspectingEmailAlert.emailAlertRecipient ||
-                      'dispatch@sema.go.ke'}
+                      'dispatch@safaricom.co.ke'}
                   </strong>
                 </div>
                 <div>
                   <span className="text-slate-400">Response Team:</span>{' '}
                   <span className="text-slate-800 font-medium">
-                    {inspectingEmailAlert.assignedTeam || 'Public Service Operations'}
+                    {inspectingEmailAlert.assignedTeam || 'Response Unit'}
                   </span>
                 </div>
                 <div>
-                  <span className="text-slate-400">Dispatched At:</span>{' '}
+                  <span className="text-slate-400">Dispatched:</span>{' '}
                   <span className="font-mono text-slate-700">
                     {inspectingEmailAlert.emailAlertSentAt
                       ? new Date(inspectingEmailAlert.emailAlertSentAt).toLocaleString('en-KE', {
@@ -2807,24 +4008,14 @@ Automated alert dispatched by Safaricom SEMA Intelligent NOC Operations.
                   </span>
                 </div>
               </div>
-
-              <div className="pt-2 border-t border-slate-200">
-                <span className="text-slate-400">Email Subject:</span>{' '}
-                <span className="font-semibold text-slate-900 font-mono text-xs">
-                  {inspectingEmailAlert.emailAlertSubject ||
-                    `[SEMA DISPATCH ALERT] ${inspectingEmailAlert.referenceCode} - ${
-                      inspectingEmailAlert.category || 'Incident'
-                    } (${inspectingEmailAlert.priority || 'Medium'} Priority)`}
-                </span>
-              </div>
             </div>
 
             {/* Email Body Memo Box */}
             <div className="space-y-1.5">
               <div className="flex items-center justify-between text-xs text-slate-500">
                 <span className="font-semibold text-slate-700">Official Dispatch Memo:</span>
-                <span className="text-2xs font-mono text-emerald-800">
-                  Transmitted via Gov Mail Gateway (Port 587 TLS)
+                <span className="text-2xs text-emerald-800">
+                  Delivered via Official Notification Service
                 </span>
               </div>
               <pre className="p-4 bg-slate-900 text-emerald-300 rounded-xl font-mono text-[11px] leading-relaxed whitespace-pre-wrap max-h-72 overflow-y-auto border border-slate-800 select-all">
@@ -2832,7 +4023,7 @@ Automated alert dispatched by Safaricom SEMA Intelligent NOC Operations.
                   generateClientEmailAlert(
                     inspectingEmailAlert,
                     inspectingEmailAlert.assignedOfficer || 'Field Lead',
-                    inspectingEmailAlert.assignedOfficerEmail || 'officer@sema.go.ke',
+                    inspectingEmailAlert.assignedOfficerEmail || 'officer@safaricom.co.ke',
                     inspectingEmailAlert.assignedTeam || 'Response Unit'
                   ).body}
               </pre>
@@ -2848,7 +4039,7 @@ Automated alert dispatched by Safaricom SEMA Intelligent NOC Operations.
                     generateClientEmailAlert(
                       inspectingEmailAlert,
                       inspectingEmailAlert.assignedOfficer || 'Field Lead',
-                      inspectingEmailAlert.assignedOfficerEmail || 'officer@sema.go.ke',
+                      inspectingEmailAlert.assignedOfficerEmail || 'officer@safaricom.co.ke',
                       inspectingEmailAlert.assignedTeam || 'Response Unit'
                     ).body;
                   navigator.clipboard.writeText(bodyText).then(() => {
@@ -2900,507 +4091,6 @@ Automated alert dispatched by Safaricom SEMA Intelligent NOC Operations.
           </div>
         </div>
       )}
-
-      {/* All Dispatched Email Alerts Logs Modal */}
-      {isEmailLogsModalOpen && (
-        <div
-          className="fixed inset-0 z-50 bg-slate-950/60 backdrop-blur-xs flex items-center justify-center p-4"
-          role="dialog"
-          aria-modal="true"
-          aria-labelledby="email-logs-title"
-        >
-          <div className="bg-white border border-slate-200 rounded-2xl max-w-4xl w-full p-6 space-y-5 shadow-2xl max-h-[90vh] overflow-y-auto">
-            {/* Modal Header */}
-            <div className="flex items-start justify-between gap-4 border-b border-slate-100 pb-3">
-              <div className="flex items-center gap-3">
-                <div className="p-2.5 bg-emerald-100/90 text-emerald-800 rounded-xl">
-                  <MailCheck className="w-6 h-6" />
-                </div>
-                <div>
-                  <h3 id="email-logs-title" className="text-lg font-bold text-slate-900">
-                    Automated Officer Email Dispatch Registry
-                  </h3>
-                  <p className="text-xs text-slate-500 mt-0.5">
-                    Real-time audit log of all automated email alerts dispatched to Kenyan field officers upon incident assignment.
-                  </p>
-                </div>
-              </div>
-              <button
-                type="button"
-                onClick={() => setIsEmailLogsModalOpen(false)}
-                className="p-1.5 text-slate-400 hover:text-slate-700 rounded-lg hover:bg-slate-100 transition-colors cursor-pointer"
-                aria-label="Close Email Logs"
-              >
-                <X className="w-5 h-5" />
-              </button>
-            </div>
-
-            {/* Email Statistics Strip */}
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-              <div className="p-3 bg-emerald-50 border border-emerald-200 rounded-xl space-y-0.5">
-                <span className="text-2xs font-semibold uppercase tracking-wider text-emerald-800">
-                  Total Dispatched Alerts
-                </span>
-                <p className="text-2xl font-bold font-mono text-emerald-950">
-                  {metrics.emailAlertsSent}
-                </p>
-                <span className="text-2xs text-emerald-700">Immediate incident notifications</span>
-              </div>
-
-              <div className="p-3 bg-sky-50 border border-sky-200 rounded-xl space-y-0.5">
-                <span className="text-2xs font-semibold uppercase tracking-wider text-sky-800">
-                  Delivery Gateway
-                </span>
-                <p className="text-base font-bold text-sky-950 flex items-center gap-1 mt-1">
-                  <CheckCircle2 className="w-4 h-4 text-emerald-600" />
-                  <span>100% Delivered</span>
-                </p>
-                <span className="text-2xs text-sky-700">Government Mail Protocol</span>
-              </div>
-
-              <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl space-y-0.5">
-                <span className="text-2xs font-semibold uppercase tracking-wider text-slate-600">
-                  Active Response Teams
-                </span>
-                <p className="text-2xl font-bold font-mono text-slate-900">
-                  {KENYAN_RESPONSE_TEAMS.length}
-                </p>
-                <span className="text-2xs text-slate-500">Home Fibre · M-PESA · 4G/5G BTS · Cyber-Fraud</span>
-              </div>
-            </div>
-
-            {/* Dispatched Logs Table */}
-            <div className="border border-slate-200 rounded-xl overflow-hidden">
-              <div className="bg-slate-50 px-4 py-2.5 border-b border-slate-200 flex items-center justify-between">
-                <span className="text-xs font-bold text-slate-700 uppercase tracking-wider">
-                  Dispatched Email Log Records ({metrics.emailAlertsSent})
-                </span>
-                <span className="text-2xs text-slate-500 font-mono">
-                  Gateway: dispatch@safaricom.co.ke
-                </span>
-              </div>
-
-              {submissions.filter((s) => s.emailAlertSent).length === 0 ? (
-                <div className="p-8 text-center space-y-2">
-                  <Mail className="w-8 h-8 text-slate-300 mx-auto" />
-                  <p className="text-xs font-semibold text-slate-700">No email alerts dispatched yet</p>
-                  <p className="text-2xs text-slate-400">
-                    Use Auto-Assign or open Dispatch Details on any incident to send alerts to officers.
-                  </p>
-                </div>
-              ) : (
-                <div className="max-h-72 overflow-y-auto">
-                  <table className="w-full text-left text-xs">
-                    <thead className="bg-slate-100 text-slate-600 uppercase text-2xs sticky top-0 font-semibold border-b border-slate-200">
-                      <tr>
-                        <th className="py-2.5 px-3">Reference &amp; Time</th>
-                        <th className="py-2.5 px-3">Assigned Officer</th>
-                        <th className="py-2.5 px-3">Response Team</th>
-                        <th className="py-2.5 px-3">Status</th>
-                        <th className="py-2.5 px-3 text-right">Action</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-slate-100">
-                      {submissions
-                        .filter((s) => s.emailAlertSent)
-                        .map((report) => (
-                          <tr key={report.id} className="hover:bg-slate-50 transition-colors">
-                            <td className="py-2.5 px-3">
-                              <span className="font-mono font-bold text-emerald-800 block">
-                                {report.referenceCode}
-                              </span>
-                              <span className="text-2xs text-slate-400 font-mono">
-                                {report.emailAlertSentAt
-                                  ? new Date(report.emailAlertSentAt).toLocaleTimeString([], {
-                                      hour: '2-digit',
-                                      minute: '2-digit',
-                                    })
-                                  : 'Recent'}{' '}
-                                EAT
-                              </span>
-                            </td>
-
-                            <td className="py-2.5 px-3">
-                              <span className="font-medium text-slate-900 block">
-                                {report.assignedOfficer || 'Field Officer'}
-                              </span>
-                              <span className="text-2xs text-slate-500 font-mono truncate max-w-[180px] block">
-                                {report.assignedOfficerEmail ||
-                                  report.emailAlertRecipient ||
-                                  'officer@safaricom.co.ke'}
-                              </span>
-                            </td>
-
-                            <td className="py-2.5 px-3 text-slate-700 font-medium">
-                              {report.assignedTeam || 'Safaricom Response Unit'}
-                            </td>
-
-                            <td className="py-2.5 px-3">
-                              <span className="inline-flex items-center gap-1 text-2xs font-semibold text-emerald-800 bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200">
-                                <CheckCircle2 className="w-3 h-3 text-emerald-600" />
-                                <span>Delivered</span>
-                              </span>
-                            </td>
-
-                            <td className="py-2.5 px-3 text-right">
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  setIsEmailLogsModalOpen(false);
-                                  setInspectingEmailAlert(report);
-                                }}
-                                className="inline-flex items-center gap-1 text-xs font-semibold text-emerald-700 hover:text-emerald-950 underline cursor-pointer"
-                              >
-                                <Eye className="w-3 h-3" />
-                                <span>View Notice</span>
-                              </button>
-                            </td>
-                          </tr>
-                        ))}
-                    </tbody>
-                  </table>
-                </div>
-              )}
-            </div>
-
-            {/* Bottom Modal Actions */}
-            <div className="flex items-center justify-between pt-2 border-t border-slate-100">
-              <span className="text-2xs text-slate-400">
-                Official Kenya Government automated notification service
-              </span>
-              <button
-                type="button"
-                onClick={() => setIsEmailLogsModalOpen(false)}
-                className="px-4 py-1.5 text-xs font-semibold text-white bg-slate-800 hover:bg-slate-900 rounded-lg cursor-pointer transition-colors"
-              >
-                Close Registry
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* AI-Powered Issue Breakdown & Incident Intelligence Section (Right before footer) */}
-      <section className="bg-slate-50/80 border-t border-slate-200/90 px-6 sm:px-8 py-8 space-y-6">
-        <div className="max-w-[1400px] mx-auto space-y-6">
-          {/* Header Bar */}
-          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-4 border-b border-slate-200">
-            <div>
-              <div className="flex items-center gap-2">
-                <span className="p-1.5 bg-emerald-100/80 text-emerald-800 rounded-lg">
-                  <PieChartIcon className="w-4 h-4" />
-                </span>
-                <h3 className="text-base font-bold text-slate-900">
-                  AI-Powered Issue Distribution &amp; Incident Analytics
-                </h3>
-                <span className="inline-flex items-center gap-1 px-2 py-0.5 text-2xs font-semibold bg-emerald-50 text-emerald-800 border border-emerald-200 rounded-full">
-                  <Sparkles className="w-3 h-3 text-emerald-600 animate-pulse" />
-                  AI Compiled
-                </span>
-              </div>
-              <p className="text-xs text-slate-500 mt-1">
-                Real-time category breakdown, civic problem density, and automated operational recommendations for Kenyan county dispatch desks.
-              </p>
-            </div>
-
-            <div className="flex items-center gap-2 self-start sm:self-auto">
-              {aiAnalyticsData?.compiledAt && (
-                <span className="text-2xs text-slate-400 font-mono hidden md:inline">
-                  Last compiled: {aiAnalyticsData.compiledAt}
-                </span>
-              )}
-              <button
-                type="button"
-                onClick={handleCompileAIAnalytics}
-                disabled={isCompilingAI}
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-emerald-900 bg-white hover:bg-emerald-50 border border-emerald-300 rounded-lg shadow-2xs transition-colors cursor-pointer disabled:opacity-50"
-                title="Re-run fast AI incident compilation"
-              >
-                {isCompilingAI ? (
-                  <>
-                    <Loader2 className="w-3.5 h-3.5 animate-spin text-emerald-700" />
-                    <span>Compiling Data...</span>
-                  </>
-                ) : (
-                  <>
-                    <RefreshCw className="w-3.5 h-3.5 text-emerald-700" />
-                    <span>Re-compile AI Analytics</span>
-                  </>
-                )}
-              </button>
-            </div>
-          </div>
-
-          {/* Main Grid: Left = Interactive Pie Chart; Right = AI Data Analysis */}
-          <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-stretch">
-            {/* Left 5 Cols: Interactive SVG Donut/Pie Chart */}
-            <div className="lg:col-span-5 bg-white border border-slate-200 rounded-xl p-5 shadow-2xs flex flex-col justify-between gap-5">
-              <div>
-                <div className="flex items-center justify-between pb-3 border-b border-slate-100">
-                  <h4 className="text-xs font-bold uppercase tracking-wider text-slate-700 flex items-center gap-1.5">
-                    <BarChart3 className="w-3.5 h-3.5 text-emerald-700" />
-                    <span>Issues by Category (Pie Chart)</span>
-                  </h4>
-                  <span className="text-xs font-semibold text-slate-500 font-mono">
-                    {pieChartData.total} Total Reports
-                  </span>
-                </div>
-
-                {/* SVG Donut Chart */}
-                <div className="flex items-center justify-center pt-4 pb-2">
-                  <div className="relative w-56 h-56 flex items-center justify-center">
-                    <svg viewBox="0 0 200 200" className="w-full h-full transform -rotate-90">
-                      {pieChartData.slices.map((slice, idx) => {
-                        const isHovered = activeHoveredCategory === slice.category;
-                        return (
-                          <path
-                            key={idx}
-                            d={slice.pathData}
-                            fill={slice.fill}
-                            stroke="#ffffff"
-                            strokeWidth={isHovered ? '3' : '1.5'}
-                            className="transition-all duration-150 cursor-pointer hover:opacity-90"
-                            style={{
-                              transformOrigin: '100px 100px',
-                              transform: isHovered ? 'scale(1.04)' : 'scale(1)',
-                            }}
-                            onMouseEnter={() => setActiveHoveredCategory(slice.category)}
-                            onMouseLeave={() => setActiveHoveredCategory(null)}
-                          />
-                        );
-                      })}
-                    </svg>
-
-                    {/* Donut Center Display */}
-                    <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none text-center px-4">
-                      {activeHoveredCategory ? (
-                        (() => {
-                          const matched = pieChartData.items.find(
-                            (i) => i.category === activeHoveredCategory
-                          );
-                          return (
-                            <>
-                              <span className="text-2xl font-black text-slate-900 tracking-tight">
-                                {matched?.percentage}%
-                              </span>
-                              <span className="text-2xs font-semibold text-slate-600 line-clamp-1 max-w-[110px]">
-                                {matched?.category}
-                              </span>
-                              <span className="text-2xs font-mono text-emerald-800">
-                                {matched?.count} incidents
-                              </span>
-                            </>
-                          );
-                        })()
-                      ) : (
-                        <>
-                          <span className="text-3xl font-black text-slate-900 tracking-tight">
-                            {pieChartData.total}
-                          </span>
-                          <span className="text-2xs font-bold uppercase tracking-wider text-slate-400">
-                            Incidents
-                          </span>
-                          <span className="text-2xs text-emerald-700 font-medium">
-                            {pieChartData.items.length} Domains
-                          </span>
-                        </>
-                      )}
-                    </div>
-                  </div>
-                </div>
-              </div>
-
-              {/* Category Legend & Breakdown List */}
-              <div className="space-y-1.5 pt-2 border-t border-slate-100 max-h-48 overflow-y-auto pr-1">
-                {pieChartData.items.map((item) => {
-                  const isHovered = activeHoveredCategory === item.category;
-                  return (
-                    <div
-                      key={item.category}
-                      onMouseEnter={() => setActiveHoveredCategory(item.category)}
-                      onMouseLeave={() => setActiveHoveredCategory(null)}
-                      className={`flex items-center justify-between px-2.5 py-1.5 rounded-lg text-xs transition-colors cursor-pointer ${
-                        isHovered ? 'bg-slate-100 font-semibold' : 'hover:bg-slate-50'
-                      }`}
-                    >
-                      <div className="flex items-center gap-2 min-w-0">
-                        <span
-                          className="w-2.5 h-2.5 rounded-full shrink-0"
-                          style={{ backgroundColor: item.fill }}
-                        />
-                        <span className="text-slate-800 truncate">{item.category}</span>
-                      </div>
-                      <div className="flex items-center gap-2 shrink-0 font-mono">
-                        <span className="text-slate-500 font-medium">{item.count}</span>
-                        <span className={`px-1.5 py-0.5 rounded text-2xs font-bold ${item.bg} ${item.text}`}>
-                          {item.percentage}%
-                        </span>
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
-
-            {/* Right 7 Cols: AI Data Analysis & Strategic Insights */}
-            <div className="lg:col-span-7 bg-white border border-slate-200 rounded-xl p-6 shadow-2xs flex flex-col justify-between gap-5">
-              <div className="space-y-5">
-                {/* Section Header */}
-                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-3 border-b border-slate-100">
-                  <div className="flex items-center gap-2">
-                    <span className="p-1 bg-amber-100/80 text-amber-800 rounded-md">
-                      <Sparkles className="w-3.5 h-3.5 text-amber-700" />
-                    </span>
-                    <h4 className="text-xs font-bold uppercase tracking-wider text-slate-800">
-                      AI Incident Data Analysis &amp; Operational Brief
-                    </h4>
-                  </div>
-
-                  <button
-                    type="button"
-                    onClick={() => {
-                      if (!aiAnalyticsData) return;
-                      const textToCopy = `SEMA AI Incident Analysis:\n${aiAnalyticsData.executiveSummary}\n\nKey Strategic Directives:\n${aiAnalyticsData.recommendations.map((r, i) => `${i + 1}. ${r}`).join('\n')}`;
-                      navigator.clipboard.writeText(textToCopy).then(() => {
-                        setHasCopiedBrief(true);
-                        setTimeout(() => setHasCopiedBrief(false), 2000);
-                      });
-                    }}
-                    className="inline-flex items-center gap-1 text-xs text-slate-600 hover:text-emerald-800 transition-colors font-medium cursor-pointer self-start sm:self-auto"
-                  >
-                    {hasCopiedBrief ? (
-                      <>
-                        <Check className="w-3.5 h-3.5 text-emerald-700" />
-                        <span className="text-emerald-700 font-semibold">Brief Copied!</span>
-                      </>
-                    ) : (
-                      <>
-                        <Copy className="w-3.5 h-3.5 text-slate-400" />
-                        <span>Copy Brief</span>
-                      </>
-                    )}
-                  </button>
-                </div>
-
-                {/* AI Executive Summary Card */}
-                <div className="bg-emerald-50/70 border border-emerald-900/12 rounded-xl p-4 space-y-2">
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="text-xs font-bold text-emerald-950 flex items-center gap-1.5">
-                      <TrendingUp className="w-3.5 h-3.5 text-emerald-700" />
-                      <span>Executive Incident Synthesis</span>
-                    </span>
-                    <span className="text-2xs font-bold uppercase tracking-wider px-2 py-0.5 rounded bg-emerald-200/60 text-emerald-900">
-                      High Confidence
-                    </span>
-                  </div>
-                  <p className="text-xs text-slate-800 leading-relaxed font-normal">
-                    {aiAnalyticsData?.executiveSummary ||
-                      'Compiling incident data from citizen submissions across Kenyan counties...'}
-                  </p>
-                </div>
-
-                {/* Fast Metric Quick-Cards: Urgency, Top Bottleneck, Response Target */}
-                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                  <div className="p-3 bg-slate-50 border border-slate-200/80 rounded-lg">
-                    <span className="text-2xs font-medium text-slate-500 uppercase tracking-wider block">
-                      Primary Issue Concentration
-                    </span>
-                    <p className="text-sm font-bold text-slate-900 mt-1 truncate">
-                      {pieChartData.items[0]?.category || 'Home Fibre & Fixed Internet'}
-                    </p>
-                    <span className="text-2xs text-emerald-800 font-semibold">
-                      {pieChartData.items[0]?.percentage || 0}% of total volume
-                    </span>
-                  </div>
-
-                  <div className="p-3 bg-red-50/60 border border-red-200/80 rounded-lg">
-                    <span className="text-2xs font-medium text-red-700 uppercase tracking-wider block flex items-center gap-1">
-                      <AlertTriangle className="w-3 h-3 text-red-600" />
-                      Urgent Severity
-                    </span>
-                    <p className="text-sm font-bold text-red-900 mt-1">
-                      {metrics.urgentCount} Critical Incidents
-                    </p>
-                    <span className="text-2xs text-red-700">
-                      Immediate threat or outage
-                    </span>
-                  </div>
-
-                  <div className="p-3 bg-cyan-50/60 border border-cyan-200/80 rounded-lg">
-                    <span className="text-2xs font-medium text-cyan-800 uppercase tracking-wider block">
-                      SLA Target Compliance
-                    </span>
-                    <p className="text-sm font-bold text-cyan-950 mt-1">
-                      94.2% on Track
-                    </p>
-                    <span className="text-2xs text-cyan-800 font-medium">
-                      Average resolution: 6.8h
-                    </span>
-                  </div>
-                </div>
-
-                {/* AI Actionable Recommendations */}
-                <div className="space-y-2 pt-1">
-                  <h5 className="text-xs font-bold text-slate-800 flex items-center gap-1.5">
-                    <ShieldAlert className="w-3.5 h-3.5 text-emerald-700" />
-                    <span>AI Recommended Action Directives for Dispatchers</span>
-                  </h5>
-                  <div className="space-y-2">
-                    {(aiAnalyticsData?.recommendations || [
-                      'Pre-deploy KeRRA road clearance teams along heavily reported arterial corridors.',
-                      'Audit Nairobi Water rapid response dispatch times to match the 4-hour burst pipe SLA.',
-                      'Maintain multilingual notifications in Kiswahili and Sheng to keep citizens updated.',
-                    ]).map((rec, i) => (
-                      <div
-                        key={i}
-                        className="flex items-start gap-2.5 p-2.5 bg-slate-50 border border-slate-200/70 rounded-lg text-xs text-slate-700"
-                      >
-                        <span className="flex items-center justify-center w-4 h-4 rounded-full bg-emerald-700 text-white font-bold text-2xs shrink-0 mt-0.5">
-                          {i + 1}
-                        </span>
-                        <span className="leading-snug">{rec}</span>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              </div>
-
-              {/* Bottom Language & Multi-agency Sync Tag */}
-              <div className="pt-3 border-t border-slate-100 flex flex-wrap items-center justify-between gap-3 text-2xs text-slate-500 font-medium">
-                <div className="flex items-center gap-3">
-                  <span>Languages Captured:</span>
-                  <span className="px-1.5 py-0.5 bg-slate-100 rounded text-slate-700 font-semibold">
-                    Kiswahili · Sheng · English
-                  </span>
-                </div>
-                <div className="flex items-center gap-1.5 text-emerald-800 font-semibold">
-                  <CheckCircle2 className="w-3 h-3 text-emerald-600" />
-                  <span>Real-time Multi-agency Dispatch Sync</span>
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
-      </section>
-
-      {/* Admin Footer */}
-      <footer className="w-full bg-white border-t border-slate-200 py-4 px-6 text-xs text-slate-500 text-center">
-        <span>Safaricom SEMA Admin Resolution Platform · Intelligent Incident Routing &amp; Field Operations (All Safaricom Issues)</span>
-      </footer>
-
-      {/* Root Cause Issue Clustering Modal */}
-      <IssueClusteringModal
-        isOpen={isClusteringModalOpen}
-        onClose={() => {
-          setIsClusteringModalOpen(false);
-          setActiveTab('feed');
-        }}
-        onFilterToCluster={(locationName) => {
-          setSelectedLocation(locationName);
-          setIsClusteringModalOpen(false);
-          setActiveTab('feed');
-        }}
-      />
     </div>
   );
 };

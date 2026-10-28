@@ -47,6 +47,7 @@ export interface AIClassification {
   recommendedTeam: string;
   rationale: string;
   estimatedSLA: string;
+  confidenceScore?: number;
   sentiment?: CitizenSentiment;
   tensionLevel?: TensionLevel;
   frustrationScore?: number;
@@ -370,12 +371,30 @@ function determineClassificationRuleBased(text: string): AIClassification {
     ? `Flagged High Tension (${clampedScore}/100): ${tensionFactors.slice(0, 2).join('; ')}.`
     : `Standard tension (${clampedScore}/100). Reporting tone is manageable.`;
 
+  const isRecognizedKeyword =
+    lower.includes('fibre') ||
+    lower.includes('fiber') ||
+    lower.includes('mpesa') ||
+    lower.includes('m-pesa') ||
+    lower.includes('4g') ||
+    lower.includes('5g') ||
+    lower.includes('airtime') ||
+    lower.includes('bonga') ||
+    lower.includes('sim swap') ||
+    lower.includes('fraud') ||
+    lower.includes('router') ||
+    lower.includes('paybill') ||
+    lower.includes('till');
+
+  const confidenceScore = isRecognizedKeyword ? 0.92 : 0.45;
+
   return {
     category,
     urgency,
     recommendedTeam,
     rationale,
     estimatedSLA,
+    confidenceScore,
     sentiment,
     tensionLevel,
     frustrationScore: clampedScore,
@@ -407,10 +426,11 @@ Determine:
 3. recommendedTeam: The exact matching Safaricom team name from the list above.
 4. rationale: A concise 1-sentence technical explanation of why this incident routes to this team and urgency level.
 5. estimatedSLA: Target response turnaround (e.g. "30 minutes", "1 hour", "2 hours", "4 hours", "12 hours", "24 hours").
-6. sentiment: One of: "Frustrated", "Distressed", "Angry", "Urgent", "Neutral", "Constructive".
-7. frustrationScore: Score from 0 to 100 based on subscriber agitation, funds stuck, red LOS light, or outage duration.
-8. isHighTension: true if frustrationScore >= 70 or urgency === "Urgent", else false.
-9. tensionNotes: A short 1-sentence note for Safaricom field engineers & care agents regarding customer sentiment.`,
+6. confidenceScore: A float between 0.0 and 1.0 representing classification confidence (e.g. 0.95 for clear issues, 0.4 for vague or ambiguous reports).
+7. sentiment: One of: "Frustrated", "Distressed", "Angry", "Urgent", "Neutral", "Constructive".
+8. frustrationScore: Score from 0 to 100 based on subscriber agitation, funds stuck, red LOS light, or outage duration.
+9. isHighTension: true if frustrationScore >= 70 or urgency === "Urgent", else false.
+10. tensionNotes: A short 1-sentence note for Safaricom field engineers & care agents regarding customer sentiment.`,
       config: {
         responseMimeType: 'application/json',
         responseSchema: {
@@ -421,6 +441,7 @@ Determine:
             recommendedTeam: { type: Type.STRING },
             rationale: { type: Type.STRING },
             estimatedSLA: { type: Type.STRING },
+            confidenceScore: { type: Type.NUMBER },
             sentiment: { type: Type.STRING },
             frustrationScore: { type: Type.INTEGER },
             isHighTension: { type: Type.BOOLEAN },
@@ -451,6 +472,7 @@ Determine:
       const frustrationScore =
         typeof parsed.frustrationScore === 'number' ? parsed.frustrationScore : urgencyVal === 'Urgent' ? 90 : 35;
       const isHighTension = parsed.isHighTension ?? (frustrationScore >= 70 || urgencyVal === 'Urgent');
+      const confidence = typeof parsed.confidenceScore === 'number' ? parsed.confidenceScore : 0.88;
 
       return {
         category: parsed.category || detectIssueCategory(text),
@@ -458,6 +480,7 @@ Determine:
         recommendedTeam: parsed.recommendedTeam || KENYAN_RESPONSE_TEAMS[0].name,
         rationale: parsed.rationale || 'Classified by SEMA automated dispatcher.',
         estimatedSLA: parsed.estimatedSLA || '24 hours',
+        confidenceScore: confidence,
         sentiment: parsed.sentiment || (isHighTension ? 'Frustrated' : 'Neutral'),
         tensionLevel: isHighTension ? 'High' : frustrationScore >= 45 ? 'Elevated' : 'Standard',
         frustrationScore,
@@ -900,8 +923,10 @@ Rules:
       const category = detectIssueCategory(input);
       const aiCommitmentResponse = generateLocalCommitment(input, detectedLanguage, category);
 
-      // Pre-compute AI classification for immediate routing insight
-      const classification = await classifyWithAI(input);
+      // Pre-compute AI classification for immediate routing insight (skip Gemini for seeded/synced feeds)
+      const classification = isSyncedFeed
+        ? determineClassificationRuleBased(input)
+        : await classifyWithAI(input);
 
       const randomDigits = Math.floor(1000 + Math.random() * 9000);
       const newRecord: SubmissionRecord = {
