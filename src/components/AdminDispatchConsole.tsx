@@ -22,6 +22,7 @@ import {
   BarChart3,
   Check,
   Copy,
+  Heart,
   ShieldAlert,
   Download,
   FileSpreadsheet,
@@ -45,11 +46,14 @@ import {
   ArrowRight,
   Maximize2,
   Minimize2,
+  Camera,
+  Image as ImageIcon,
 } from 'lucide-react';
 import demoComplaintsData from '../data/demoComplaints.json';
 import {
   SubmissionRecord,
   KENYAN_RESPONSE_TEAMS,
+  ResponseTeam,
   PriorityLevel,
   ReportStatus,
   AIClassification,
@@ -70,6 +74,7 @@ import {
 } from '../utils/clusterComputation';
 import { DateRangePicker, DateRangeValue } from './DateRangePicker';
 import { evaluateAndAutoDispatch } from '../utils/autoDispatch';
+import { triageTickets } from '../utils/triage';
 
 export interface StatusLegendItem {
   status: ReportStatus;
@@ -233,9 +238,28 @@ export const AdminDispatchConsole: React.FC<AdminDispatchConsoleProps> = ({
 
   // Channel Feeds Sync & Stream State
   const [isSyncingFeeds, setIsSyncingFeeds] = useState(false);
-  const [syncProgress, setSyncProgress] = useState({ current: 0, total: 30 });
+  const [syncProgress, setSyncProgress] = useState<{ current: number; total: number }>(() => {
+    const total = demoComplaintsData?.records?.length || 30;
+    const syncedIds = new Set(demoComplaintsData?.records?.map((r) => r.id) || []);
+    const count = (submissions || []).filter(
+      (s) => s.isSyncedFeed || syncedIds.has(s.id) || s.id.startsWith('dummy-')
+    ).length;
+    return { current: Math.min(count, total), total };
+  });
   const syncTimerRef = useRef<any>(null);
   const syncIndexRef = useRef(0);
+
+  // Keep sync progress counter aligned with store when not actively syncing
+  useEffect(() => {
+    if (!isSyncingFeeds) {
+      const total = demoComplaintsData?.records?.length || 30;
+      const syncedIds = new Set(demoComplaintsData?.records?.map((r) => r.id) || []);
+      const count = submissions.filter(
+        (s) => s.isSyncedFeed || syncedIds.has(s.id) || s.id.startsWith('dummy-')
+      ).length;
+      setSyncProgress({ current: Math.min(count, total), total });
+    }
+  }, [submissions, isSyncingFeeds]);
 
   // Status & Feedback States
   const [copiedStepsTicket, setCopiedStepsTicket] = useState<string | null>(null);
@@ -246,6 +270,58 @@ export const AdminDispatchConsole: React.FC<AdminDispatchConsoleProps> = ({
   const [exportSuccessMessage, setExportSuccessMessage] = useState<string | null>(null);
   const [emailSuccessMessage, setEmailSuccessMessage] = useState<string | null>(null);
   const [classifyingId, setClassifyingId] = useState<string | null>(null);
+
+  // Single dynamic teams list initialized with standard teams and updated with AI-suggested teams
+  const [teams, setTeams] = useState<ResponseTeam[]>(() => {
+    try {
+      const stored = localStorage.getItem('sema_response_teams');
+      if (stored) {
+        const parsed = JSON.parse(stored);
+        if (Array.isArray(parsed) && parsed.length >= KENYAN_RESPONSE_TEAMS.length) {
+          return parsed;
+        }
+      }
+    } catch {
+      // fallback
+    }
+    return KENYAN_RESPONSE_TEAMS;
+  });
+
+  // Sync AI-suggested teams from any submissions
+  useEffect(() => {
+    const aiTeams: ResponseTeam[] = [];
+    for (const s of submissions) {
+      if (s.proposedTeam && s.proposedTeam.name) {
+        if (!teams.some((t) => t.name === s.proposedTeam!.name)) {
+          aiTeams.push({
+            id: `team-ai-${s.proposedTeam.code.toLowerCase()}`,
+            name: s.proposedTeam.name,
+            shortCode: s.proposedTeam.code || 'AI-TEAM',
+            department: s.proposedTeam.scope || s.proposedTeam.name,
+            leadOfficer: 'To be assigned',
+            email: 'dispatch@safaricom.co.ke',
+            phone: '0722 000 000',
+            activeCount: 0,
+            color: 'teal',
+            isAiSuggested: true,
+            scope: s.proposedTeam.scope,
+          });
+        }
+      }
+    }
+    if (aiTeams.length > 0) {
+      setTeams((prev) => {
+        const map = new Map<string, ResponseTeam>();
+        prev.forEach((t) => map.set(t.name, t));
+        aiTeams.forEach((t) => map.set(t.name, t));
+        const updated = Array.from(map.values());
+        try {
+          localStorage.setItem('sema_response_teams', JSON.stringify(updated));
+        } catch {}
+        return updated;
+      });
+    }
+  }, [submissions, teams]);
 
   // Auto-dispatch Engine State (Default ON, backed by localStorage)
   const [isAutoDispatchEnabled, setIsAutoDispatchEnabled] = useState<boolean>(() => {
@@ -268,13 +344,38 @@ export const AdminDispatchConsole: React.FC<AdminDispatchConsoleProps> = ({
       } catch {
         // ignore
       }
-      const msg = nextVal
-        ? 'Auto-dispatch enabled: Incoming incidents will automatically route to specialized response teams.'
-        : 'Auto-dispatch disabled: Incoming incidents will hold in Received queue for manual triage.';
-      setInflowToast(msg);
-      setTimeout(() => {
-        setInflowToast((curr) => (curr === msg ? null : curr));
-      }, 3500);
+
+      if (nextVal) {
+        // Dispatch all eligible unassigned tickets in queue
+        let count = 0;
+        const updated = submissions.map((t) => {
+          if (
+            (t.status === 'Received' || !t.assignedTeam) &&
+            t.status !== 'Feedback' &&
+            t.intent !== 'Compliment' &&
+            (t.confidence ?? t.aiClassification?.confidenceScore ?? 0.8) >= 0.6
+          ) {
+            const { record, dispatched } = evaluateAndAutoDispatch(t, true);
+            if (dispatched) count++;
+            return record;
+          }
+          return t;
+        });
+
+        if (count > 0 && onSetSubmissions) {
+          onSetSubmissions(updated);
+          try {
+            localStorage.setItem('sema_submissions', JSON.stringify(updated));
+          } catch {}
+          setInflowToast(`Auto-dispatch enabled: Dispatched ${count} eligible incident ${count === 1 ? 'ticket' : 'tickets'} immediately.`);
+        } else {
+          setInflowToast('Auto-dispatch enabled: Incoming incidents will automatically route to specialized response teams.');
+        }
+      } else {
+        setInflowToast('Auto-dispatch disabled: Incoming incidents will hold in Received queue for manual triage.');
+      }
+
+      setTimeout(() => setInflowToast(null), 3500);
       return nextVal;
     });
   };
@@ -313,6 +414,7 @@ export const AdminDispatchConsole: React.FC<AdminDispatchConsoleProps> = ({
   const [isEmailLogsModalOpen, setIsEmailLogsModalOpen] = useState<boolean>(false);
   const [sendingEmailForId, setSendingEmailForId] = useState<string | null>(null);
   const [copiedEmailText, setCopiedEmailText] = useState<boolean>(false);
+  const [selectedEnlargedImage, setSelectedEnlargedImage] = useState<string | null>(null);
 
   // AI Analytics & Pie Chart states
   const [activeHoveredCategory, setActiveHoveredCategory] = useState<string | null>(null);
@@ -555,14 +657,47 @@ export const AdminDispatchConsole: React.FC<AdminDispatchConsoleProps> = ({
   }, [submissions.length]);
 
   // Metrics computation (The 4 core KPIs)
+  // Compliments are NOT incidents! Mark them "Feedback", do not dispatch or count in Unassigned or Urgent
   const metrics = useMemo(() => {
     const total = submissions.length;
-    const unassigned = submissions.filter((s) => s.status === 'Received' || !s.assignedTeam).length;
+    const unassigned = submissions.filter(
+      (s) => (s.status === 'Received' || !s.assignedTeam) && s.status !== 'Feedback' && s.intent !== 'Compliment'
+    ).length;
     const inProgress = submissions.filter((s) => s.status === 'In Progress' || s.status === 'Assigned').length;
     const resolved = submissions.filter((s) => s.status === 'Resolved' || s.status === 'Closed').length;
-    const urgentCount = submissions.filter((s) => s.priority === 'Urgent').length;
+    const urgentCount = submissions.filter(
+      (s) => s.priority === 'Urgent' && s.status !== 'Feedback' && s.intent !== 'Compliment'
+    ).length;
     const emailAlertsSent = submissions.filter((s) => s.emailAlertSent).length;
     return { total, unassigned, inProgress, resolved, urgentCount, emailAlertsSent };
+  }, [submissions]);
+
+  // Urgent categories and dynamic subtitle reflecting the actual categories of urgent tickets
+  const urgentCategories = useMemo(() => {
+    const set = new Set<string>();
+    for (const s of submissions) {
+      if (s.priority === 'Urgent' && s.status !== 'Feedback' && s.intent !== 'Compliment') {
+        const cat = s.category || s.operationalCategory;
+        if (cat) set.add(cat);
+      }
+    }
+    return Array.from(set);
+  }, [submissions]);
+
+  const urgentSubtitle = useMemo(() => {
+    if (urgentCategories.length === 0) return 'Zero urgent incidents';
+    if (urgentCategories.length === 1) return `Critical ${urgentCategories[0]} urgency`;
+    return `Critical ${urgentCategories.slice(0, 2).join(' / ')} ${urgentCategories.length > 2 ? `+${urgentCategories.length - 2} more` : 'urgency'}`;
+  }, [urgentCategories]);
+
+  // Dynamic Categories derived directly from data (not a fixed list)
+  const dynamicCategories = useMemo(() => {
+    const set = new Set<string>();
+    for (const s of submissions) {
+      const cat = s.category || s.operationalCategory;
+      if (cat && cat.trim()) set.add(cat.trim());
+    }
+    return ['All Categories', ...Array.from(set).sort()];
   }, [submissions]);
 
   // Status counts for the visual status legend
@@ -573,6 +708,7 @@ export const AdminDispatchConsole: React.FC<AdminDispatchConsoleProps> = ({
       'In Progress': 0,
       Resolved: 0,
       Closed: 0,
+      Feedback: 0,
     };
     for (const s of submissions) {
       if (counts[s.status] !== undefined) {
@@ -592,16 +728,7 @@ export const AdminDispatchConsole: React.FC<AdminDispatchConsoleProps> = ({
   };
 
   const getReportCategory = (sub: SubmissionRecord): string => {
-    if (sub.operationalCategory) return sub.operationalCategory;
-    const cat = (sub.category || '').toLowerCase();
-    if (cat.includes('fibre') || cat.includes('fiber')) return 'Fibre';
-    if (cat.includes('pesa')) return 'M-PESA';
-    if (cat.includes('outage') || cat.includes('blackout')) return 'Network Outage';
-    if (cat.includes('slow') || cat.includes('speed')) return 'Slow Internet';
-    if (cat.includes('voice') || cat.includes('call')) return 'Voice Calls';
-    if (cat.includes('bill') || cat.includes('tariff') || cat.includes('charge')) return 'Billing';
-    if (cat.includes('cover') || cat.includes('signal') || cat.includes('4g') || cat.includes('5g')) return 'Coverage';
-    return 'Coverage';
+    return sub.category || sub.operationalCategory || 'Mobile Network & 4G/5G Coverage';
   };
 
   const isReportInLocation = (sub: SubmissionRecord, loc: string): boolean => {
@@ -642,26 +769,22 @@ export const AdminDispatchConsole: React.FC<AdminDispatchConsoleProps> = ({
     return counts;
   }, [submissions]);
 
-  // Operational Category counts
+  // Operational Category counts dynamically populated from data
   const categoryCounts = useMemo(() => {
     const counts: Record<string, number> = {
       'All Categories': submissions.length,
-      'Network Outage': 0,
-      'Slow Internet': 0,
-      'Voice Calls': 0,
-      'M-PESA': 0,
-      Fibre: 0,
-      Billing: 0,
-      Coverage: 0,
     };
+    for (const cat of dynamicCategories) {
+      if (cat !== 'All Categories') counts[cat] = 0;
+    }
     for (const s of submissions) {
-      const cat = getReportCategory(s);
-      if (counts[cat] !== undefined) {
+      const cat = s.category || s.operationalCategory;
+      if (cat && counts[cat] !== undefined) {
         counts[cat]++;
       }
     }
     return counts;
-  }, [submissions]);
+  }, [submissions, dynamicCategories]);
 
   // Location counts
   const locationCounts = useMemo(() => {
@@ -1123,81 +1246,91 @@ export const AdminDispatchConsole: React.FC<AdminDispatchConsoleProps> = ({
     syncTimerRef.current = setInterval(stepSync, 850);
   };
 
-  // Automatic feed sync on initial load if no synced feeds exist
-  const autoSyncStartedRef = useRef(false);
-  useEffect(() => {
-    if (autoSyncStartedRef.current) return;
-
-    try {
-      const isCompleted = localStorage.getItem('sema_synced_feeds_completed');
-      if (isCompleted === 'true' || isCompleted === 'cleared') {
-        return;
-      }
-    } catch {
-      // ignore
-    }
-
-    const syncedIds = new Set(demoComplaintsData?.records?.map((r) => r.id) || []);
-    const hasSynced = submissions.some(
-      (s) => s.isSyncedFeed || syncedIds.has(s.id) || s.id.startsWith('sema-sync-')
-    );
-
-    if (hasSynced) {
-      try {
-        localStorage.setItem('sema_synced_feeds_completed', 'true');
-      } catch {
-        // ignore
-      }
-      return;
-    }
-
-    // Start background sync automatically with no button press
-    autoSyncStartedRef.current = true;
-    startSyncingFeedsProcess(0);
-  }, [submissions]);
-
-  // Manual sync button on Channel Feeds page: immediately adds/updates all 30 records in store and persists
-  const handleToggleSyncFeeds = () => {
-    const records = demoComplaintsData?.records || [];
-    if (records.length === 0) return;
+  // Manual sync button on Channel Feeds page: smart AI batch triage (batches of 15)
+  const handleToggleSyncFeeds = async () => {
+    const rawRecords = demoComplaintsData?.records || [];
+    if (rawRecords.length === 0) return;
 
     setIsSyncingFeeds(true);
-    const newRecords = records.map((raw) => {
-      try {
-        return buildRecordFromDemoComplaint(raw, isAutoDispatchEnabled);
-      } catch (err) {
-        console.warn(`Fallback rule-based building for record ${raw.id}:`, err);
-        return buildRecordFromDemoComplaint(raw, isAutoDispatchEnabled);
-      }
-    });
+    setSyncProgress({ current: 0, total: rawRecords.length });
 
-    const map = new Map<string, SubmissionRecord>();
-    submissions.forEach((s) => map.set(s.id, s));
-    newRecords.forEach((r) => map.set(r.id, r));
-    const merged = Array.from(map.values());
-
-    if (onSetSubmissions) {
-      onSetSubmissions(merged);
-    }
     try {
-      localStorage.setItem('sema_submissions', JSON.stringify(merged));
-      localStorage.setItem('sema_synced_feeds_completed', 'true');
-    } catch (err) {
-      console.warn('localStorage save failed:', err);
-    }
+      // 1. Build base records preserving exact channel and operationalCategory as hint
+      const baseRecords: SubmissionRecord[] = rawRecords.map((raw) => {
+        return classifyAndBuildSyncedRecord(raw);
+      });
 
-    setSyncProgress({ current: records.length, total: records.length });
-    setIsSyncingFeeds(false);
-    setInflowToast(`Successfully synced all ${records.length} channel records into ticket store.`);
-    setTimeout(() => setInflowToast(null), 3500);
+      // 2. Run smart batch triage with AI (batches up to 15, response schema, localStorage cached)
+      const { triagedRecords, newTeams } = await triageTickets(
+        baseRecords,
+        isAutoDispatchEnabled,
+        (current) => {
+          setSyncProgress({ current, total: rawRecords.length });
+        }
+      );
+
+      // 3. Incorporate any AI-suggested teams
+      if (newTeams && newTeams.length > 0) {
+        setTeams((prev) => {
+          const map = new Map<string, ResponseTeam>();
+          prev.forEach((t) => map.set(t.name, t));
+          newTeams.forEach((t) => map.set(t.name, t));
+          const updated = Array.from(map.values());
+          try {
+            localStorage.setItem('sema_response_teams', JSON.stringify(updated));
+          } catch {}
+          return updated;
+        });
+      }
+
+      // 4. Merge into shared store:
+      // NEVER overwrite, duplicate or delete customer-portal tickets!
+      const syncedIds = new Set(rawRecords.map((r) => r.id));
+      const customerPortalTickets = submissions.filter(
+        (s) => !s.isSyncedFeed && !syncedIds.has(s.id) && !s.id.startsWith('dummy-')
+      );
+      const merged = [...customerPortalTickets, ...triagedRecords];
+
+      if (onSetSubmissions) {
+        onSetSubmissions(merged);
+      }
+      try {
+        localStorage.setItem('sema_submissions', JSON.stringify(merged));
+        localStorage.setItem('sema_synced_feeds_completed', 'true');
+      } catch (err) {
+        console.warn('localStorage save failed:', err);
+      }
+
+      // Sync backend store
+      try {
+        await fetch('/api/submissions/sync', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ records: triagedRecords }),
+        });
+      } catch (err) {
+        console.warn('Server sync error:', err);
+      }
+
+      setSyncProgress({ current: rawRecords.length, total: rawRecords.length });
+      setInflowToast(`Successfully synced & triaged ${rawRecords.length} channel records.`);
+    } catch (err) {
+      console.error('Error during feeds sync:', err);
+      setInflowToast('Feeds sync completed with rule-based triage.');
+    } finally {
+      setIsSyncingFeeds(false);
+      setTimeout(() => setInflowToast(null), 3500);
+    }
   };
 
   const handleClearSyncedFeeds = async () => {
     stopFeedsSync();
     syncIndexRef.current = 0;
-    setSyncProgress({ current: 0, total: demoComplaintsData?.records?.length || 30 });
+    const totalCount = demoComplaintsData?.records?.length || 30;
+    setSyncProgress({ current: 0, total: totalCount });
 
     const syncedIds = new Set(demoComplaintsData?.records?.map((r) => r.id) || []);
+    // Remove ONLY synced records; NEVER remove customer-submitted portal tickets!
     const remaining = submissions.filter(
       (s) => !s.isSyncedFeed && !syncedIds.has(s.id) && !s.id.startsWith('dummy-') && !s.id.startsWith('sema-sync-')
     );
@@ -1220,7 +1353,7 @@ export const AdminDispatchConsole: React.FC<AdminDispatchConsoleProps> = ({
     }
 
     const removedCount = submissions.length - remaining.length;
-    setInflowToast(`Cleared synced feeds (${removedCount} records removed)`);
+    setInflowToast(`Cleared synced feeds (${removedCount} records removed; customer tickets preserved)`);
     setTimeout(() => setInflowToast(null), 3500);
   };
 
@@ -1234,6 +1367,14 @@ export const AdminDispatchConsole: React.FC<AdminDispatchConsoleProps> = ({
 
   // Channel badge renderer with distinctive colors and icons
   const renderChannelBadge = (channel?: InflowChannel | string, captureMethod?: string) => {
+    if (captureMethod === 'image') {
+      return (
+        <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[10px] font-bold bg-amber-100 text-amber-900 border border-amber-300 shrink-0">
+          <Camera className="w-2.5 h-2.5 text-amber-700 shrink-0" />
+          <span>Screenshot</span>
+        </span>
+      );
+    }
     const ch = channel || (captureMethod === 'voice' ? 'Web Voice Portal' : 'Call Center CRM');
     switch (ch) {
       case 'Zuri':
@@ -1469,6 +1610,8 @@ CUSTOMER INCIDENT REPORT (ORIGINAL):
 "${report.text}"
 Language: ${report.detectedLanguage} (Capture Method: ${report.captureMethod})
 ${report.englishTranslation ? `\nEnglish Translation:\n"${report.englishTranslation}"\n` : ''}
+${report.imageAnalysis ? `\nAI Visual Diagnosis / Likely Issue:\n"${report.imageAnalysis}"\n` : ''}
+${report.attachedImages && report.attachedImages.length > 0 ? `\nAttached Screenshots/Photos: ${report.attachedImages.length} image(s) attached by customer\n` : ''}
 ${report.contactInfo ? `Customer Line / Contact: ${report.contactInfo}` : 'Customer Contact: Anonymous / SEMA Portal'}
 
 ------------------------------------------------------
@@ -1503,15 +1646,22 @@ Automated alert dispatched by Safaricom SEMA Intelligent NOC Operations.
     }
 
     setInspectingReport(activeReport);
-    const initialTeamName =
-      activeReport.assignedTeam || activeReport.aiClassification?.recommendedTeam || KENYAN_RESPONSE_TEAMS[0].name;
-    setDispatchTeam(initialTeamName);
+    // If ticket is unassigned, show "Select team" without defaulting to the first team
+    const assignedTeamName = activeReport.assignedTeam || '';
+    setDispatchTeam(assignedTeamName);
 
-    const matchedTeam =
-      KENYAN_RESPONSE_TEAMS.find((t) => t.name === initialTeamName) || KENYAN_RESPONSE_TEAMS[0];
+    if (assignedTeamName) {
+      const matchedTeam =
+        teams.find((t) => t.name === assignedTeamName) ||
+        KENYAN_RESPONSE_TEAMS.find((t) => t.name === assignedTeamName) ||
+        KENYAN_RESPONSE_TEAMS[0];
+      setDispatchOfficer(activeReport.assignedOfficer || matchedTeam.leadOfficer || 'Field Desk Officer');
+      setDispatchOfficerEmail(activeReport.assignedOfficerEmail || matchedTeam.email || 'dispatch@safaricom.co.ke');
+    } else {
+      setDispatchOfficer('');
+      setDispatchOfficerEmail('');
+    }
 
-    setDispatchOfficer(activeReport.assignedOfficer || matchedTeam.leadOfficer || 'Field Desk Officer');
-    setDispatchOfficerEmail(activeReport.assignedOfficerEmail || matchedTeam.email || 'dispatch@sema.go.ke');
     setSendAutomatedEmail(true);
     setShowEmailPreview(false);
     setDispatchPriority(activeReport.priority || activeReport.aiClassification?.urgency || 'Medium');
@@ -1521,7 +1671,12 @@ Automated alert dispatched by Safaricom SEMA Intelligent NOC Operations.
 
   const handleTeamChange = (teamName: string) => {
     setDispatchTeam(teamName);
-    const matched = KENYAN_RESPONSE_TEAMS.find((t) => t.name === teamName);
+    if (!teamName) {
+      setDispatchOfficer('');
+      setDispatchOfficerEmail('');
+      return;
+    }
+    const matched = teams.find((t) => t.name === teamName) || KENYAN_RESPONSE_TEAMS.find((t) => t.name === teamName);
     if (matched) {
       setDispatchOfficer(matched.leadOfficer);
       setDispatchOfficerEmail(matched.email);
@@ -1531,10 +1686,21 @@ Automated alert dispatched by Safaricom SEMA Intelligent NOC Operations.
   const handleSaveDispatch = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!inspectingReport) return;
+
+    if (!dispatchTeam) {
+      setInflowToast('Please select a response team before dispatching.');
+      setTimeout(() => setInflowToast(null), 3000);
+      return;
+    }
+
     setIsSavingDispatch(true);
 
     const matchedTeam =
-      KENYAN_RESPONSE_TEAMS.find((t) => t.name === dispatchTeam) || KENYAN_RESPONSE_TEAMS[0];
+      teams.find((t) => t.name === dispatchTeam) ||
+      KENYAN_RESPONSE_TEAMS.find((t) => t.name === dispatchTeam) || {
+        leadOfficer: 'To be assigned',
+        email: 'dispatch@safaricom.co.ke',
+      };
     const resolvedEmail = dispatchOfficerEmail.trim() || matchedTeam.email;
 
     const emailContent = generateClientEmailAlert(
@@ -2273,7 +2439,7 @@ Automated alert dispatched by Safaricom SEMA Intelligent NOC Operations.
                   <p className="text-2xl font-bold font-mono tabular-nums text-red-600 truncate">
                     {metrics.urgentCount}
                   </p>
-                  <p className="text-[11px] text-red-500 truncate">Critical fibre / M-PESA urgency</p>
+                  <p className="text-[11px] text-red-500 truncate">{urgentSubtitle}</p>
                 </div>
               </div>
 
@@ -2363,13 +2529,16 @@ Automated alert dispatched by Safaricom SEMA Intelligent NOC Operations.
                         }}
                         className="p-3 rounded-lg border border-slate-200/80 hover:border-emerald-500 bg-slate-50/50 hover:bg-emerald-50/30 transition-all cursor-pointer space-y-1.5"
                       >
-                        <div className="flex items-center justify-between">
-                          {renderChannelBadge(ch)}
-                          <span className="text-[10px] font-mono text-slate-400">{pct}%</span>
+                        <div className="flex items-center justify-between gap-1">
+                          <div className="truncate">{renderChannelBadge(ch)}</div>
+                          <span className="text-[10px] font-mono font-bold text-slate-500 shrink-0 tabular-nums">{pct}%</span>
                         </div>
-                        <p className="text-lg font-bold font-mono text-slate-900 tabular-nums">
-                          {count}
-                        </p>
+                        <div className="flex items-baseline justify-between pt-0.5">
+                          <p className="text-lg font-bold font-mono text-slate-900 tabular-nums">
+                            {count}
+                          </p>
+                          <span className="text-[10px] text-slate-400">cases</span>
+                        </div>
                         <div className="w-full bg-slate-200 h-1.5 rounded-full overflow-hidden">
                           <div
                             className="bg-emerald-600 h-full rounded-full"
@@ -2492,7 +2661,7 @@ Automated alert dispatched by Safaricom SEMA Intelligent NOC Operations.
                     }}
                     className="h-8 px-2.5 text-xs bg-slate-50 border border-slate-200 rounded-lg text-slate-800 font-medium focus:outline-none focus:border-emerald-600 cursor-pointer"
                   >
-                    {OPERATIONAL_CATEGORIES.map((cat) => (
+                    {dynamicCategories.map((cat) => (
                       <option key={cat} value={cat}>
                         {cat} ({categoryCounts[cat] || 0})
                       </option>
@@ -2948,9 +3117,9 @@ Automated alert dispatched by Safaricom SEMA Intelligent NOC Operations.
                       key={ch}
                       className="bg-white border border-slate-200 rounded-xl p-4.5 shadow-2xs space-y-3 hover:border-emerald-500 transition-colors"
                     >
-                      <div className="flex items-center justify-between">
-                        {renderChannelBadge(ch)}
-                        <span className="text-xs font-mono font-bold text-slate-500">{pct}% of queue</span>
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="shrink-0">{renderChannelBadge(ch)}</div>
+                        <span className="text-xs font-mono font-bold text-slate-500 shrink-0 tabular-nums">{pct}% of queue</span>
                       </div>
 
                       <div>
@@ -3166,13 +3335,13 @@ Automated alert dispatched by Safaricom SEMA Intelligent NOC Operations.
                     <span>Safaricom PLC Incident &amp; Network Response Teams</span>
                   </h3>
                   <p className="text-xs text-slate-500 mt-0.5">
-                    7 Specialized Technical &amp; Operational Units Connected for automated dispatch and field mobilization.
+                    {teams.length} Specialized Technical &amp; Operational Units Connected for automated dispatch and field mobilization.
                   </p>
                 </div>
               </div>
 
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3.5">
-                {KENYAN_RESPONSE_TEAMS.map((team) => {
+                {teams.map((team) => {
                   const teamActiveAssigned = submissions.filter(
                     (s) => s.assignedTeam === team.name
                   ).length;
@@ -3184,9 +3353,16 @@ Automated alert dispatched by Safaricom SEMA Intelligent NOC Operations.
                     >
                       <div className="flex items-start justify-between gap-2">
                         <div>
-                          <p className="text-sm font-bold text-slate-900 leading-snug">
-                            {team.name}
-                          </p>
+                          <div className="flex items-center gap-2">
+                            <p className="text-sm font-bold text-slate-900 leading-snug">
+                              {team.name}
+                            </p>
+                            {team.isAiSuggested && (
+                              <span className="text-[10px] font-mono px-2 py-0.5 bg-teal-100 text-teal-800 rounded font-bold shrink-0">
+                                AI-suggested
+                              </span>
+                            )}
+                          </div>
                           <span className="text-[11px] text-emerald-700 font-medium">
                             {team.department}
                           </span>
@@ -3864,6 +4040,78 @@ Automated alert dispatched by Safaricom SEMA Intelligent NOC Operations.
                   </div>
                 )}
 
+                {/* Linked Issue Group */}
+                {inspectingReport.issueGroupId && (
+                  <div className="bg-amber-50/70 border border-amber-200 rounded-xl p-3.5 space-y-1.5 text-xs">
+                    <div className="flex items-center justify-between">
+                      <span className="font-bold text-amber-950 flex items-center gap-1.5">
+                        <Zap className="w-4 h-4 text-amber-600" />
+                        <span>Linked Issue Group: {inspectingReport.issueGroupTitle || inspectingReport.issueGroupId}</span>
+                      </span>
+                    </div>
+                    {inspectingReport.issueGroupCause && (
+                      <p className="text-amber-900 text-xs leading-relaxed">
+                        <strong>Possible cause (AI hypothesis):</strong> {inspectingReport.issueGroupCause}
+                      </p>
+                    )}
+                  </div>
+                )}
+
+                {/* Compliments & Positive Customer Feedback Card */}
+                {(inspectingReport.intent === 'Compliment' || inspectingReport.status === 'Feedback') && (
+                  <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-4 space-y-2.5 text-xs">
+                    <div className="flex items-center justify-between">
+                      <span className="font-bold text-emerald-950 flex items-center gap-1.5">
+                        <Heart className="w-4 h-4 text-emerald-600 fill-emerald-600" />
+                        <span>Customer Praise / Feedback</span>
+                      </span>
+                      <span className="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider bg-emerald-200 text-emerald-900">
+                        Feedback (No Dispatch)
+                      </span>
+                    </div>
+                    <p className="text-slate-600 text-xs">
+                      Compliments are recognized as feedback and not incidents requiring technical dispatch. Drafted thank-you response:
+                    </p>
+                    <div className="p-3 bg-white border border-emerald-200 rounded-lg text-slate-800 font-medium">
+                      {inspectingReport.thankYouReply || 'Asante sana for contacting Safaricom. We appreciate your feedback and look forward to serving you!'}
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const reply = inspectingReport.thankYouReply || 'Asante sana for contacting Safaricom. We appreciate your feedback and look forward to serving you!';
+                        navigator.clipboard.writeText(reply).then(() => {
+                          setInflowToast('Thank-you reply copied to clipboard.');
+                          setTimeout(() => setInflowToast(null), 2500);
+                        });
+                      }}
+                      className="px-3 py-1.5 bg-emerald-700 hover:bg-emerald-800 text-white font-semibold rounded-lg text-xs cursor-pointer inline-flex items-center gap-1.5 shadow-2xs"
+                    >
+                      <Copy className="w-3.5 h-3.5" />
+                      <span>Copy Thank-You Reply</span>
+                    </button>
+                  </div>
+                )}
+
+                {/* Customer Enquiry & Self-Help Steps */}
+                {inspectingReport.intent === 'Enquiry' && inspectingReport.selfHelpSteps && inspectingReport.selfHelpSteps.length > 0 && (
+                  <div className="bg-sky-50 border border-sky-200 rounded-xl p-4 space-y-2 text-xs">
+                    <span className="font-bold text-sky-950 flex items-center gap-1.5">
+                      <Bot className="w-4 h-4 text-sky-700" />
+                      <span>Customer Self-Help Guidance Steps</span>
+                    </span>
+                    <div className="space-y-1.5 pt-1">
+                      {inspectingReport.selfHelpSteps.map((step, idx) => (
+                        <div key={idx} className="flex items-start gap-2 p-2 bg-white rounded-lg border border-sky-100 text-slate-800">
+                          <span className="w-4 h-4 rounded-full bg-sky-700 text-white font-bold text-2xs flex items-center justify-center shrink-0 mt-0.5">
+                            {idx + 1}
+                          </span>
+                          <span className="leading-snug">{step}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
                 {/* 4. Team Assignment & Dispatch Form */}
                 <form onSubmit={handleSaveDispatch} className="space-y-3.5 pt-2 border-t border-slate-200">
                   <h4 className="text-xs font-bold uppercase tracking-wider text-slate-700">
@@ -3881,9 +4129,10 @@ Automated alert dispatched by Safaricom SEMA Intelligent NOC Operations.
                         onChange={(e) => handleTeamChange(e.target.value)}
                         className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-lg text-slate-900 font-medium focus:outline-none focus:border-emerald-600 cursor-pointer"
                       >
-                        {KENYAN_RESPONSE_TEAMS.map((team) => (
+                        <option value="">Select team</option>
+                        {teams.map((team) => (
                           <option key={team.id} value={team.name}>
-                            {team.name}
+                            {team.name} {team.isAiSuggested ? '(AI-suggested)' : ''}
                           </option>
                         ))}
                       </select>

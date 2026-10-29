@@ -345,8 +345,22 @@ export function computeClustersFromStore(submissions: SubmissionRecord[]): Incid
       if (hasData) impactedServices.push('4G/5G Cellular Data & RAN Sectors');
       if (impactedServices.length === 0) impactedServices.push('Telecom & Network Connectivity');
 
+      // Extract cause from triaged tickets in this cluster if available
+      const ticketWithCause = bestClusterTickets.find((t) => t.issueGroupCause && t.issueGroupCause.trim());
+      let rawCause = ticketWithCause?.issueGroupCause || '';
+
       let rootCause = `Possible cause (AI hypothesis): Concentrated incident spike in ${group.area}. Automated correlation linked ${bestClusterTickets.length} cross-channel complaints.`;
-      if (hasFibre && hasMpesa) {
+
+      if (rawCause) {
+        if (!hasFibre) {
+          rawCause = rawCause.replace(/\b(road construction|excavator|optical cut|fiber cut|fibre cut|splicing|fiber|fibre)\b/gi, 'network equipment fault');
+        }
+        if (!rawCause.toLowerCase().startsWith('possible cause (ai hypothesis):')) {
+          rootCause = `Possible cause (AI hypothesis): ${rawCause.replace(/^possible cause \(ai hypothesis\):\s*/i, '')}`;
+        } else {
+          rootCause = rawCause;
+        }
+      } else if (hasFibre && hasMpesa) {
         rootCause = `Possible cause (AI hypothesis): Metro optical fiber backhaul fault along ${group.area} corridor, knocking out residential broadband and cascading to transmission gateways for mobile money settlements.`;
       } else if (hasFibre) {
         rootCause = `Possible cause (AI hypothesis): Distribution optical fiber feeder fault or cable attenuation along ${group.area} corridor affecting customer optical network terminals.`;

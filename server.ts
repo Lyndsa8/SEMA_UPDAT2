@@ -38,7 +38,7 @@ function getGenAIClient(): GoogleGenAI | null {
 }
 
 export type PriorityLevel = 'Urgent' | 'High' | 'Medium' | 'Routine';
-export type ReportStatus = 'Received' | 'Assigned' | 'In Progress' | 'Resolved' | 'Closed';
+export type ReportStatus = 'Received' | 'Assigned' | 'In Progress' | 'Resolved' | 'Closed' | 'Feedback';
 export type CitizenSentiment = 'Frustrated' | 'Distressed' | 'Angry' | 'Urgent' | 'Neutral' | 'Constructive';
 export type TensionLevel = 'High' | 'Elevated' | 'Standard';
 
@@ -66,7 +66,9 @@ export interface SubmissionRecord {
   category: string;
   countyOrWard: string;
   contactInfo?: string;
-  captureMethod: 'voice' | 'text' | 'hybrid';
+  captureMethod: 'voice' | 'text' | 'hybrid' | 'image';
+  attachedImages?: string[];
+  imageAnalysis?: string;
   aiCommitmentResponse: string;
   status: ReportStatus;
   createdAt: string;
@@ -95,6 +97,17 @@ export interface SubmissionRecord {
   isHighTension?: boolean;
   tensionFactors?: string[];
   tensionNotes?: string;
+  slaStartedAt?: string;
+  intent?: 'Complaint' | 'Enquiry' | 'Compliment' | 'Spam';
+  confidence?: number;
+  aiResolutionSteps?: string[];
+  issueGroupId?: string;
+  issueGroupTitle?: string;
+  issueGroupCause?: string;
+  thankYouReply?: string;
+  selfHelpSteps?: string[];
+  proposedTeam?: { name: string; code: string; scope: string };
+  needsReview?: boolean;
 }
 
 export interface EmailDispatchLog {
@@ -508,6 +521,154 @@ function generateLocalCommitment(text: string, lang: 'English' | 'Kiswahili' | '
   return `Thank you for contacting Safaricom. Your incident regarding ${category} has been logged with our Network Operations Center (NOC). A specialized field & systems team has been assigned for resolution.`;
 }
 
+async function triageSingleTicketWithAI(
+  text: string,
+  countyOrWard: string,
+  contactInfo: string,
+  latitude?: number,
+  longitude?: number
+) {
+  const ai = getGenAIClient();
+  const lower = text.toLowerCase();
+
+  const isCompliment =
+    lower.includes('shukrani') ||
+    lower.includes('asante') ||
+    lower.includes('hongera') ||
+    lower.includes('thank') ||
+    lower.includes('good job');
+
+  const isEnquiry =
+    lower.includes('how to') ||
+    lower.includes('kujua') ||
+    lower.includes('settings') ||
+    lower.includes('apn') ||
+    lower.includes('invoice') ||
+    lower.includes('inquire') ||
+    lower.includes('inquiry');
+
+  if (ai) {
+    try {
+      const locationContext = [countyOrWard, latitude && longitude ? `Coordinates: ${latitude}, ${longitude}` : '']
+        .filter(Boolean)
+        .join(' · ');
+
+      const prompt = `You are the Lead Incident Triage AI for Safaricom SEMA in Kenya.
+A customer just submitted a problem report from the SEMA Customer Portal (Web Voice / Text).
+Customer Report: "${text}"
+Location captured: "${locationContext}"
+Contact info: "${contactInfo || 'None'}"
+
+Available official response teams:
+- Safaricom Home Fibre & Enterprise NOC (Fixed internet, optical fibre, router red LOS, ONT)
+- M-PESA Escalations & Reversals Operations (M-PESA transactions, reversals, Till/Paybill stuck, Fuliza)
+- 4G / 5G Mobile Network & Base Transceiver (BTS) Team (Cellular towers, 4G/5G signal, coverage, slow mobile data, call drops)
+- SIM Swap, Identity Protection & Cyber-Fraud Unit (SIM swaps, scams, tapeli, unauthorized line takeover, hacking, PUK)
+- Customer Experience & Airtime Billing Desk (Customer care, airtime deductions, Bonga points, billing queries)
+- Enterprise Business Solutions & Cloud Desk (Dedicated leased lines, corporate cloud, bulk SMS)
+- Lipa Na M-PESA & Merchant Services Desk (Merchant till issues, settlement callbacks, buy goods)
+
+CRITICAL RULES:
+1. INTENT: Classify as "Complaint", "Enquiry", "Compliment", or "Spam".
+   - Compliments (praise, gratitude) MUST have intent="Compliment". Compliments are not incidents: draft a warm thank-you reply.
+   - Enquiries (how to, questions) MUST have intent="Enquiry". Provide self-help steps or route to Customer Care.
+2. TEAMS & FRAUD SAFETY:
+   - All SIM swap and fraud concerns MUST be High or Urgent priority and assigned to "SIM Swap, Identity Protection & Cyber-Fraud Unit".
+   - Customer advice / resolution steps MUST NEVER ask for a PIN, OTP, or ID number.
+   - If no existing team fits, propose a NEW team (name, code, scope) with lead "To be assigned".
+3. CONSISTENCY:
+   - Provide exactly 3 actionable resolution steps strictly matching the ticket's category.
+   - NO optical, fibre, or OTDR steps UNLESS the category is Fibre!
+4. TRANSLATION:
+   - Provide a natural, real English translation (never just a verbatim copy of Kiswahili or Sheng text).
+5. ISSUE GROUPING & LINKING:
+   - Provide an issueGroupId based on area and service (e.g., "grp-ruaka-fibre", "grp-ruaka-mpesa", "grp-nyali-data"), a title, and a possible cause.
+   - For possibleCause: Do NOT mention road construction, an excavator, or an optical cut UNLESS the ticket is genuinely about fibre. Always format as "Possible cause (AI hypothesis): ...".`;
+
+      const response = await ai.models.generateContent({
+        model: 'gemini-3.8-flash',
+        contents: prompt,
+        config: {
+          responseMimeType: 'application/json',
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              intent: { type: Type.STRING },
+              category: { type: Type.STRING },
+              urgency: { type: Type.STRING },
+              confidence: { type: Type.NUMBER },
+              bestTeam: { type: Type.STRING },
+              proposedTeam: {
+                type: Type.OBJECT,
+                properties: {
+                  name: { type: Type.STRING },
+                  code: { type: Type.STRING },
+                  scope: { type: Type.STRING },
+                },
+              },
+              englishTranslation: { type: Type.STRING },
+              resolutionSteps: {
+                type: Type.ARRAY,
+                items: { type: Type.STRING },
+              },
+              issueGroupId: { type: Type.STRING },
+              issueGroupTitle: { type: Type.STRING },
+              issueGroupCause: { type: Type.STRING },
+              thankYouReply: { type: Type.STRING },
+              selfHelpSteps: {
+                type: Type.ARRAY,
+                items: { type: Type.STRING },
+              },
+            },
+            required: [
+              'intent',
+              'category',
+              'urgency',
+              'confidence',
+              'bestTeam',
+              'englishTranslation',
+              'resolutionSteps',
+              'issueGroupId',
+            ],
+          },
+        },
+      });
+
+      if (response.text) {
+        return JSON.parse(response.text.trim());
+      }
+    } catch (err) {
+      console.warn('Single-ticket AI triage notice:', err);
+    }
+  }
+
+  // Fallback rule-based
+  const ruleCat = detectIssueCategory(text);
+  const ruleClass = determineClassificationRuleBased(text);
+  let intent: 'Complaint' | 'Enquiry' | 'Compliment' | 'Spam' = 'Complaint';
+  if (isCompliment) intent = 'Compliment';
+  else if (isEnquiry) intent = 'Enquiry';
+
+  return {
+    intent,
+    category: ruleClass.category,
+    urgency: ruleClass.urgency,
+    confidence: isCompliment || isEnquiry ? 0.92 : ruleClass.confidenceScore || 0.88,
+    bestTeam: ruleClass.recommendedTeam,
+    englishTranslation: text,
+    resolutionSteps: [
+      `Acknowledge and inspect customer inquiry regarding ${ruleClass.category}.`,
+      `Verify customer line status and service network logs.`,
+      `Notify customer upon complete resolution.`
+    ],
+    issueGroupId: `grp-${ruleCat.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`,
+    issueGroupTitle: `${ruleClass.category} Reported Incident`,
+    issueGroupCause: `Possible cause (AI hypothesis): Localized operational service inquiry logged from ${countyOrWard}.`,
+    thankYouReply: isCompliment ? 'Thank you for your warm compliment! Safaricom appreciates your trust.' : undefined,
+    needsReview: true,
+  };
+}
+
 const submissionsStore: SubmissionRecord[] = [
   {
     id: 'sema-101',
@@ -661,58 +822,6 @@ Automated alert dispatched by Safaricom SEMA Intelligent NOC Operations.
     },
     createdAt: new Date(Date.now() - 1000 * 60 * 95).toISOString(),
   },
-  ...((demoComplaintsData?.records || []).map((rec) => {
-    const minutesAgo = rec.minutesAgo || 0;
-    const createdAt = new Date(Date.now() - minutesAgo * 60 * 1000).toISOString();
-    const classification = determineClassificationRuleBased(rec.text);
-    const matchedTeam =
-      KENYAN_RESPONSE_TEAMS.find((t) => t.name === classification.recommendedTeam) ||
-      KENYAN_RESPONSE_TEAMS[0];
-
-    let locationTown = 'Nairobi';
-    const cw = (rec.countyOrWard || '').toLowerCase();
-    if (cw.includes('ruaka')) locationTown = 'Ruaka';
-    else if (cw.includes('nyali') || cw.includes('mombasa')) locationTown = 'Mombasa';
-    else if (cw.includes('nakuru')) locationTown = 'Nakuru';
-    else if (cw.includes('kisumu')) locationTown = 'Kisumu';
-    else if (cw.includes('eldoret')) locationTown = 'Eldoret';
-    else if (cw.includes('nyeri')) locationTown = 'Nyeri';
-    else if (cw.includes('kiambu')) locationTown = 'Kiambu';
-
-    const randCode = Math.floor(1000 + Math.random() * 9000);
-    return {
-      id: rec.id,
-      referenceCode: `SEMA-SAF-${randCode}`,
-      text: rec.text,
-      detectedLanguage: (rec.detectedLanguage as any) || 'English',
-      englishTranslation: rec.detectedLanguage !== 'English' ? `Translation: ${rec.text}` : undefined,
-      category: rec.operationalCategory || classification.category,
-      countyOrWard: rec.countyOrWard,
-      locationTown,
-      contactInfo: rec.contactInfo || undefined,
-      captureMethod: (rec.inflowChannel === 'Web Voice Portal' ? 'voice' : 'text') as 'voice' | 'text',
-      aiCommitmentResponse: `SEMA automated dispatch: Incident logged via ${rec.inflowChannel} from ${rec.countyOrWard}. Dispatched to ${matchedTeam.name}.`,
-      status: 'Received' as ReportStatus,
-      priority: classification.urgency,
-      assignedTeam: undefined,
-      assignedOfficer: undefined,
-      assignedOfficerEmail: undefined,
-      channel: rec.inflowChannel,
-      operationalCategory: rec.operationalCategory,
-      handle: rec.handle || undefined,
-      latitude: typeof rec.latitude === 'number' ? rec.latitude : undefined,
-      longitude: typeof rec.longitude === 'number' ? rec.longitude : undefined,
-      isSyncedFeed: true,
-      aiClassification: classification,
-      sentiment: classification.sentiment,
-      tensionLevel: classification.tensionLevel,
-      frustrationScore: classification.frustrationScore,
-      isHighTension: classification.isHighTension,
-      tensionFactors: classification.tensionFactors,
-      tensionNotes: classification.tensionNotes,
-      createdAt,
-    };
-  })),
 ];
 
 async function startServer() {
@@ -944,12 +1053,119 @@ Rules:
     }
   });
 
+  // Image multimodal diagnostic endpoint (up to 3 images compressed in browser)
+  app.post('/api/analyze-images', async (req, res) => {
+    try {
+      const { images } = req.body;
+      if (!Array.isArray(images) || images.length === 0) {
+        return res.status(400).json({ error: 'No images provided for analysis.' });
+      }
+
+      const validImages = images.slice(0, 3).filter((img: any) => typeof img === 'string' && img.length > 50);
+      if (validImages.length === 0) {
+        return res.status(400).json({ error: 'Invalid image format.' });
+      }
+
+      const ai = getGenAIClient();
+      if (!ai) {
+        return res.json({
+          isReadable: false,
+          draft: '',
+          translation: '',
+          category: '',
+          likelyIssue: '',
+          error: 'AI vision model unavailable',
+        });
+      }
+
+      const parts: any[] = [];
+      for (const imgStr of validImages) {
+        let mimeType = 'image/jpeg';
+        let base64Data = imgStr;
+        const match = imgStr.match(/^data:(image\/[a-zA-Z0-9+.-]+);base64,(.+)$/);
+        if (match) {
+          mimeType = match[1];
+          base64Data = match[2];
+        }
+        parts.push({
+          inlineData: {
+            mimeType,
+            data: base64Data,
+          },
+        });
+      }
+
+      parts.push({
+        text: `You are an expert Safaricom diagnostic AI analyzing customer screenshots or photos for incident reporting in Kenya.
+Inspect the provided image(s) (up to 3). Read any text, error banners, dialogs, ONT router indicator lights, M-PESA transaction screens, signal icons, or mobile app states.
+
+Instructions:
+1. Determine if the image is readable and related to a telecom, internet, mobile app, network, or billing service issue (isReadable: true/false). If it is completely unreadable, blurry, or unrelated to telecom/mobile issues (e.g. food, scenery, selfie, black screen), set isReadable: false.
+2. If readable:
+   - Identify the likely issue (likelyIssue: short, concise technical diagnosis, e.g. "One App stuck on a loading spinner while mobile data is on", "Home Fibre Huawei router blinking red LOS light indicating optical fiber loss", "M-PESA transaction failed with error message system busy", etc.).
+   - Determine the operational category (category: e.g. "One App", "Home Fibre & Fixed Internet", "M-PESA & Financial Services", "Mobile Network & 4G/5G Coverage", "Customer Care & Airtime Billing", "Enterprise & Cloud Solutions", or "Lipa Na M-PESA & Merchant Services").
+   - Determine customer language from the context or text (English, Kiswahili, or Sheng).
+   - Generate a draft complaint in the customer's language (draft: 1-3 sentences describing the problem accurately, ready for the customer to edit and confirm).
+   - Provide a short English translation of the draft (translation).
+3. If not readable or unrelated:
+   - isReadable: false
+   - draft: ""
+   - translation: ""
+   - category: ""
+   - likelyIssue: "Image appears unreadable or unrelated to a telecom/service issue."
+
+IMPORTANT: Never include customer PINs, full ID numbers or full M-PESA confirmation codes in the output.`
+      });
+
+      const response = await ai.models.generateContent({
+        model: 'gemini-3.8-flash',
+        contents: { parts },
+        config: {
+          responseMimeType: 'application/json',
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              isReadable: { type: Type.BOOLEAN },
+              likelyIssue: { type: Type.STRING },
+              category: { type: Type.STRING },
+              language: { type: Type.STRING },
+              draft: { type: Type.STRING },
+              translation: { type: Type.STRING },
+            },
+            required: ['isReadable', 'likelyIssue', 'category', 'draft', 'translation'],
+          },
+        },
+      });
+
+      const responseText = response.text?.trim() || '{}';
+      const parsed = JSON.parse(responseText);
+      return res.json({
+        isReadable: Boolean(parsed.isReadable),
+        likelyIssue: parsed.likelyIssue || '',
+        category: parsed.category || '',
+        language: parsed.language || 'English',
+        draft: parsed.draft || '',
+        translation: parsed.translation || '',
+      });
+    } catch (err: any) {
+      console.warn('Multimodal image analysis error:', err);
+      return res.json({
+        isReadable: false,
+        likelyIssue: 'Could not analyze image due to a temporary service error.',
+        category: '',
+        draft: '',
+        translation: '',
+        error: err?.message || 'Image analysis error',
+      });
+    }
+  });
+
   // 4. Get Submissions (Admin + Public)
   app.get('/api/submissions', (_req, res) => {
     return res.json({ submissions: submissionsStore });
   });
 
-  // 5. Submit Problem Report to SEMA
+  // 5. Submit Problem Report to SEMA (Immediate Smart Triage for customer portal)
   app.post('/api/submissions', async (req, res) => {
     try {
       const {
@@ -957,7 +1173,7 @@ Rules:
         countyOrWard = 'Nairobi County',
         contactInfo = '',
         captureMethod = 'text',
-        channel,
+        channel = 'Web Voice Portal',
         operationalCategory,
         latitude,
         longitude,
@@ -965,6 +1181,8 @@ Rules:
         createdAt,
         isSyncedFeed,
         id,
+        attachedImages,
+        imageAnalysis,
       } = req.body;
 
       if (!text || typeof text !== 'string' || !text.trim()) {
@@ -976,29 +1194,111 @@ Rules:
       const category = detectIssueCategory(input);
       const aiCommitmentResponse = generateLocalCommitment(input, detectedLanguage, category);
 
-      // Pre-compute AI classification for immediate routing insight (skip Gemini for seeded/synced feeds)
-      const classification = isSyncedFeed
-        ? determineClassificationRuleBased(input)
-        : await classifyWithAI(input);
+      // 1. Triage customer-portal ticket immediately (one Gemini request, including location if captured)
+      const triage = await triageSingleTicketWithAI(
+        input,
+        countyOrWard,
+        contactInfo,
+        latitude,
+        longitude
+      );
+
+      const resolvedCategory = triage.category || category;
+      const resolvedUrgency = triage.urgency || 'Medium';
+      const resolvedTeamName = triage.bestTeam || 'Customer Experience & Airtime Billing Desk';
+      const matchedTeam =
+        KENYAN_RESPONSE_TEAMS.find((t) => t.name === resolvedTeamName) || KENYAN_RESPONSE_TEAMS[0];
+
+      // Enforce category consistency: No optical/fibre steps unless Fibre
+      let sanitizedSteps = triage.resolutionSteps || [];
+      const isFibre = /fibre|fiber/i.test(resolvedCategory);
+      const hasOptical = sanitizedSteps.some((s: string) =>
+        /\b(optical|fibre|fiber|otdr|ont|splicing|splice|drop cable|feeder cable)\b/i.test(s)
+      );
+      if (!isFibre && hasOptical) {
+        if (/mpesa|m-pesa/i.test(resolvedCategory)) {
+          sanitizedSteps = [
+            'Query core M-PESA G2 financial switch ledger for MSISDN transaction token and state.',
+            'Initiate automated transaction reconciliation and push forced settlement callback to merchant gateway.',
+            'Dispatch SMS reversal or completion confirmation directly to customer line.',
+          ];
+        } else if (/sim swap|fraud/i.test(resolvedCategory)) {
+          sanitizedSteps = [
+            'Verify subscriber identity via official Safaricom KYC biometric channel and flag security ticket.',
+            'Place immediate emergency freeze on unauthorized SIM replacement to prevent financial compromise.',
+            'Advise customer to visit nearest Safaricom Shop with National ID; never disclose PIN or one-time codes.',
+          ];
+        } else {
+          sanitizedSteps = [
+            'Analyze Radio Access Network (RAN) sector performance, traffic load, and antenna azimuth alignment.',
+            'Execute remote frequency carrier re-allocation and restart degraded base transceiver baseband unit.',
+            'Dispatch field RF engineer for on-site microwave backhaul power audit if sector fails diagnostic.',
+          ];
+        }
+      }
+
+      // Fraud Safety check on steps: never ask for PIN, OTP, or ID number
+      sanitizedSteps = sanitizedSteps.map((s: string) => {
+        let clean = s;
+        clean = clean.replace(/\b(enter your pin|provide your pin|give pin|pin number|share your pin|send pin)\b/gi, 'secure your PIN privately');
+        clean = clean.replace(/\b(share your otp|provide otp|send otp|enter otp|give otp)\b/gi, 'never share your OTP verification code with anyone');
+        clean = clean.replace(/\b(give id number|send id copy|submit id number online)\b/gi, 'present physical National ID in person at official Safaricom Shop');
+        return clean;
+      });
 
       const randomDigits = Math.floor(1000 + Math.random() * 9000);
+      const isCompliment = triage.intent === 'Compliment';
+      const isEnquiry = triage.intent === 'Enquiry';
+      const canAutoDispatch = !isCompliment && triage.intent === 'Complaint' && (triage.confidence ?? 0.8) >= 0.6;
+
+      const initialStatus: ReportStatus = isCompliment ? 'Feedback' : canAutoDispatch ? 'Assigned' : 'Received';
+      const slaStartedAt = canAutoDispatch ? new Date().toISOString() : undefined;
+
       const newRecord: SubmissionRecord = {
         id: id || `sema-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
         referenceCode: `SEMA-SAF-${randomDigits}`,
         text: input,
         detectedLanguage,
-        englishTranslation: detectedLanguage !== 'English' ? `Translation: ${input}` : undefined,
-        category: classification.category,
+        englishTranslation: triage.englishTranslation || (detectedLanguage !== 'English' ? `Translation: ${input}` : undefined),
+        category: resolvedCategory,
         countyOrWard: countyOrWard.trim() || 'Kenya (General)',
         contactInfo: contactInfo.trim() || undefined,
-        captureMethod,
-        aiCommitmentResponse,
-        status: 'Received',
-        priority: classification.urgency,
-        aiClassification: classification,
+        captureMethod: (attachedImages && attachedImages.length > 0 ? 'image' : captureMethod) as any,
+        attachedImages: Array.isArray(attachedImages) ? attachedImages : undefined,
+        imageAnalysis: typeof imageAnalysis === 'string' ? imageAnalysis : undefined,
+        aiCommitmentResponse: isCompliment
+          ? 'Asante sana! Tumepokea pongezi zako na tunashukuru sana kwa kutumia huduma za Safaricom.'
+          : aiCommitmentResponse,
+        status: initialStatus,
+        priority: resolvedUrgency as PriorityLevel,
+        assignedTeam: canAutoDispatch ? matchedTeam.name : undefined,
+        assignedOfficer: canAutoDispatch ? matchedTeam.leadOfficer : undefined,
+        assignedOfficerEmail: canAutoDispatch ? matchedTeam.email : undefined,
+        slaStartedAt,
+        emailAlertSent: canAutoDispatch,
+        emailAlertRecipient: canAutoDispatch ? matchedTeam.email : undefined,
+        emailAlertSentAt: slaStartedAt,
+        intent: triage.intent,
+        confidence: triage.confidence,
+        aiResolutionSteps: sanitizedSteps,
+        issueGroupId: triage.issueGroupId,
+        issueGroupTitle: triage.issueGroupTitle,
+        issueGroupCause: triage.issueGroupCause,
+        thankYouReply: triage.thankYouReply,
+        selfHelpSteps: isEnquiry ? sanitizedSteps : undefined,
+        proposedTeam: triage.proposedTeam,
+        aiClassification: {
+          category: resolvedCategory,
+          urgency: resolvedUrgency as PriorityLevel,
+          recommendedTeam: matchedTeam.name,
+          rationale: triage.intent === 'Compliment' ? 'Customer compliment logged as feedback.' : `Incident triaged and routed to ${matchedTeam.name}.`,
+          estimatedSLA: resolvedUrgency === 'Urgent' ? '2 hours' : resolvedUrgency === 'High' ? '4 hours' : '24 hours',
+          confidenceScore: triage.confidence,
+          sentiment: isCompliment ? 'Constructive' : resolvedUrgency === 'Urgent' ? 'Frustrated' : 'Neutral',
+        },
         createdAt: createdAt || new Date().toISOString(),
-        channel,
-        operationalCategory,
+        channel: (channel || 'Web Voice Portal') as any,
+        operationalCategory: operationalCategory as any,
         latitude: typeof latitude === 'number' ? latitude : undefined,
         longitude: typeof longitude === 'number' ? longitude : undefined,
         handle: handle || undefined,
@@ -1013,13 +1313,15 @@ Rules:
         referenceCode: `SEMA-SAF-${Math.floor(1000 + Math.random() * 9000)}`,
         text: req.body?.text || 'Report received',
         detectedLanguage: 'English',
-        category: 'Civic Services',
+        category: 'Customer Care & Airtime Billing',
         countyOrWard: req.body?.countyOrWard || 'Kenya (General)',
-        captureMethod: 'text',
+        captureMethod: (req.body?.attachedImages?.length ? 'image' : req.body?.captureMethod || 'text') as any,
+        attachedImages: Array.isArray(req.body?.attachedImages) ? req.body.attachedImages : undefined,
+        imageAnalysis: typeof req.body?.imageAnalysis === 'string' ? req.body.imageAnalysis : undefined,
         aiCommitmentResponse: 'Your report has been received by SEMA rapid response desk.',
         status: 'Received',
         createdAt: req.body?.createdAt || new Date().toISOString(),
-        channel: req.body?.channel,
+        channel: req.body?.channel || 'Web Voice Portal',
         operationalCategory: req.body?.operationalCategory,
         latitude: req.body?.latitude,
         longitude: req.body?.longitude,
@@ -1028,6 +1330,23 @@ Rules:
       };
       submissionsStore.unshift(fallbackRecord);
       return res.status(201).json({ submission: fallbackRecord });
+    }
+  });
+
+  // Bulk sync from client to persist all synced records on server
+  app.post('/api/submissions/sync', (req, res) => {
+    try {
+      const { submissions: incoming = [] } = req.body;
+      if (Array.isArray(incoming) && incoming.length > 0) {
+        const map = new Map<string, SubmissionRecord>();
+        submissionsStore.forEach((s) => map.set(s.id, s));
+        incoming.forEach((s: SubmissionRecord) => map.set(s.id, s));
+        submissionsStore.length = 0;
+        submissionsStore.push(...Array.from(map.values()));
+      }
+      return res.json({ success: true, count: submissionsStore.length });
+    } catch {
+      return res.status(500).json({ error: 'Sync failed' });
     }
   });
 
@@ -1384,6 +1703,8 @@ CITIZEN INCIDENT REPORT (ORIGINAL):
 "${item.text}"
 Language: ${item.detectedLanguage} (Capture Method: ${item.captureMethod})
 ${item.englishTranslation ? `\nEnglish Translation:\n"${item.englishTranslation}"\n` : ''}
+${item.imageAnalysis ? `\nAI Visual Diagnosis / Likely Issue:\n"${item.imageAnalysis}"\n` : ''}
+${item.attachedImages && item.attachedImages.length > 0 ? `\nAttached Screenshots/Photos: ${item.attachedImages.length} image(s) attached by customer\n` : ''}
 ${item.contactInfo ? `Citizen Contact: ${item.contactInfo}` : 'Citizen Contact: Anonymous / Voice Portal'}
 
 ------------------------------------------------------

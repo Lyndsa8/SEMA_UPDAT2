@@ -74,25 +74,13 @@ export default function App() {
       if (stored) {
         const parsed = JSON.parse(stored);
         if (Array.isArray(parsed) && parsed.length > 0) {
-          const existingIds = new Set(parsed.map((s: SubmissionRecord) => s.id));
-          const demoRecords = getAllDemoSubmissionRecords();
-          const missing = demoRecords.filter((d) => !existingIds.has(d.id));
-          if (missing.length === 0) {
-            return parsed;
-          }
-          const merged = [...parsed, ...missing];
-          try {
-            localStorage.setItem('sema_submissions', JSON.stringify(merged));
-          } catch {
-            // ignore
-          }
-          return merged;
+          return parsed;
         }
       }
     } catch (err) {
       console.warn('Failed to load initial submissions from localStorage', err);
     }
-    const initial = [...INITIAL_SUBMISSIONS, ...getAllDemoSubmissionRecords()];
+    const initial = [...INITIAL_SUBMISSIONS];
     try {
       localStorage.setItem('sema_submissions', JSON.stringify(initial));
     } catch {

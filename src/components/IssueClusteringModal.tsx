@@ -19,8 +19,8 @@ export const CLUSTERS = [
     status: 'High Impact / Active Emergency',
     isPrimaryHub: true,
     rootCause:
-      'Road construction excavator cut the high-count 96-core metro fiber optical feeder along Limuru Road near Two Rivers Mall.',
-    impactedServices: ['4G/5G BTS Cellular Sectors', 'Home Fibre Broadband (Red LOS)', 'USSD & Mobile Money Handshake'],
+      'Distribution optical fiber feeder fault along Limuru Road near Two Rivers Mall affecting customer endpoints.',
+    impactedServices: ['Home Fibre Broadband (Red LOS)', 'Local Commercial Internet'],
     channelBreakdown: {
       'Call Center CRM': 24,
       'Social Media (Twitter/X & WhatsApp)': 33,
@@ -279,7 +279,7 @@ export const IssueClusteringModal: React.FC<IssueClusteringModalProps> = ({
 
                         <p className="text-[11px] text-slate-600 leading-snug line-clamp-2">
                           <strong className="text-slate-700">Possible cause (AI hypothesis): </strong>
-                          {cluster.rootCause}
+                          {cluster.rootCause.replace(/^possible cause \(ai hypothesis\):\s*/i, '')}
                         </p>
 
                         <div className="pt-2 border-t border-slate-100 flex items-center justify-between">

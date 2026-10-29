@@ -150,11 +150,57 @@ export function evaluateAndAutoDispatch(
   const confidence = ticket.aiClassification?.confidenceScore;
   const isConfidenceTooLow = typeof confidence === 'number' && confidence < 0.6;
 
-  const matchedTeam = mapCategoryToResponseTeam(
+  let matchedTeam = mapCategoryToResponseTeam(
     ticket.category,
     ticket.operationalCategory,
     ticket.text
   );
+
+  // Fraud Safety rule: SIM swap and fraud concerns ALWAYS route to Cyber-Fraud Unit
+  const textLower = (ticket.text || '').toLowerCase();
+  if (
+    ticket.category === 'SIM Swap, Fraud & Security' ||
+    textLower.includes('sim swap') ||
+    textLower.includes('fraud') ||
+    textLower.includes('tapeli') ||
+    textLower.includes('puk') ||
+    textLower.includes('theft')
+  ) {
+    const fraudTeam = KENYAN_RESPONSE_TEAMS.find((t) => t.id === 'team-fraud') || KENYAN_RESPONSE_TEAMS[3];
+    matchedTeam = fraudTeam;
+  }
+
+  // AI-suggested / proposed team fallback
+  if (!matchedTeam && ticket.proposedTeam && ticket.proposedTeam.name) {
+    matchedTeam = {
+      id: `team-ai-${ticket.proposedTeam.code.toLowerCase()}`,
+      name: ticket.proposedTeam.name,
+      shortCode: ticket.proposedTeam.code || 'AI-TEAM',
+      department: ticket.proposedTeam.scope || ticket.proposedTeam.name,
+      leadOfficer: 'To be assigned',
+      email: 'dispatch@safaricom.co.ke',
+      phone: '0722 000 000',
+      activeCount: 0,
+      color: 'teal',
+      isAiSuggested: true,
+      scope: ticket.proposedTeam.scope,
+    };
+  } else if (!matchedTeam && ticket.aiClassification?.recommendedTeam) {
+    const recName = ticket.aiClassification.recommendedTeam;
+    const found = KENYAN_RESPONSE_TEAMS.find((t) => t.name === recName);
+    matchedTeam = found || {
+      id: `team-${recName.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`,
+      name: recName,
+      shortCode: 'AI-TEAM',
+      department: ticket.category || 'Operational Unit',
+      leadOfficer: 'To be assigned',
+      email: 'dispatch@safaricom.co.ke',
+      phone: '0722 000 000',
+      activeCount: 0,
+      color: 'teal',
+      isAiSuggested: true,
+    };
+  }
 
   const isCategoryUnknown =
     !ticket.category ||
@@ -162,7 +208,7 @@ export function evaluateAndAutoDispatch(
     ticket.category.toLowerCase().includes('other') ||
     !matchedTeam;
 
-  if (isConfidenceTooLow || isCategoryUnknown) {
+  if (isConfidenceTooLow || isCategoryUnknown || !matchedTeam) {
     // Leave the ticket Unassigned for manual triage and show a "Needs review" badge
     const reviewRecord: SubmissionRecord = {
       ...ticket,
@@ -218,6 +264,8 @@ CUSTOMER INCIDENT REPORT:
 "${ticket.text}"
 Language: ${ticket.detectedLanguage} (Capture Method: ${ticket.captureMethod || 'text'})
 ${ticket.englishTranslation ? `\nEnglish Translation:\n"${ticket.englishTranslation}"\n` : ''}
+${ticket.imageAnalysis ? `\nAI Visual Diagnosis / Likely Issue:\n"${ticket.imageAnalysis}"\n` : ''}
+${ticket.attachedImages && ticket.attachedImages.length > 0 ? `\nAttached Screenshots/Photos: ${ticket.attachedImages.length} image(s) attached by customer\n` : ''}
 ${ticket.contactInfo ? `Customer Line / Contact: ${ticket.contactInfo}` : 'Customer Contact: Digital Web Portal'}
 
 ------------------------------------------------------

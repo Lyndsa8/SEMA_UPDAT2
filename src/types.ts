@@ -64,7 +64,9 @@ export interface SubmissionRecord {
   category: string;
   countyOrWard: string;
   contactInfo?: string;
-  captureMethod: 'voice' | 'text' | 'hybrid';
+  captureMethod: 'voice' | 'text' | 'hybrid' | 'image';
+  attachedImages?: string[];
+  imageAnalysis?: string;
   aiCommitmentResponse: string;
   status: ReportStatus;
   createdAt: string;

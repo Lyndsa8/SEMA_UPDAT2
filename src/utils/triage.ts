@@ -164,11 +164,8 @@ export function sanitizeTriagedTicket(
     intent = 'Enquiry';
   }
 
-  // 2. Category determination
+  // 2. Category determination (operationalCategory in the file is only a hint that triage may correct)
   let category = ticket.category || operationalCat || 'Mobile Network & 4G/5G Coverage';
-  if (operationalCat && operationalCat.trim()) {
-    category = operationalCat;
-  }
   if (
     textLower.includes('sim swap') ||
     textLower.includes('fraud') ||
@@ -178,7 +175,9 @@ export function sanitizeTriagedTicket(
   ) {
     category = 'SIM Swap, Fraud & Security';
   } else if (textLower.includes('mpesa') || textLower.includes('m-pesa') || textLower.includes('till') || textLower.includes('paybill') || textLower.includes('reversal')) {
-    category = operationalCat === 'M-PESA' ? 'M-PESA' : 'M-PESA & Financial Services';
+    category = 'M-PESA & Financial Services';
+  } else if (textLower.includes('fibre') || textLower.includes('fiber') || textLower.includes('router') || textLower.includes('red light') || textLower.includes('los light')) {
+    category = 'Home Fibre & Fixed Internet';
   }
 
   // 3. Urgency & Best Team (Fraud safety rule)

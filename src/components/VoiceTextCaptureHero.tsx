@@ -944,7 +944,7 @@ export const VoiceTextCaptureHero: React.FC<VoiceTextCaptureHeroProps> = ({
     setSubmissions((prev) => {
       const updated = [finalRecord, ...prev];
       try {
-        localStorage.setItem('sema_submissions', JSON.stringify(updated.slice(0, 30)));
+        localStorage.setItem('sema_submissions', JSON.stringify(updated));
       } catch {
         // ignore
       }
