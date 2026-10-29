@@ -13,6 +13,7 @@ import { DemoWalkthroughVideoModal } from './components/DemoWalkthroughVideoModa
 import { SubmissionRecord } from './types';
 import { INITIAL_SUBMISSIONS } from './data/initialSubmissions';
 import { evaluateAndAutoDispatch } from './utils/autoDispatch';
+import { getAllDemoSubmissionRecords } from './utils/clusterComputation';
 
 export default function App() {
   const [currentView, setCurrentView] = useState<'citizen' | 'admin'>(() => {
@@ -66,20 +67,38 @@ export default function App() {
     };
   }, []);
 
-  // Centralized Submissions State
+  // Centralized Submissions State (Shared across all views & persisted in localStorage)
   const [submissions, setSubmissions] = useState<SubmissionRecord[]>(() => {
     try {
       const stored = localStorage.getItem('sema_submissions');
       if (stored) {
         const parsed = JSON.parse(stored);
         if (Array.isArray(parsed) && parsed.length > 0) {
-          return parsed;
+          const existingIds = new Set(parsed.map((s: SubmissionRecord) => s.id));
+          const demoRecords = getAllDemoSubmissionRecords();
+          const missing = demoRecords.filter((d) => !existingIds.has(d.id));
+          if (missing.length === 0) {
+            return parsed;
+          }
+          const merged = [...parsed, ...missing];
+          try {
+            localStorage.setItem('sema_submissions', JSON.stringify(merged));
+          } catch {
+            // ignore
+          }
+          return merged;
         }
       }
+    } catch (err) {
+      console.warn('Failed to load initial submissions from localStorage', err);
+    }
+    const initial = [...INITIAL_SUBMISSIONS, ...getAllDemoSubmissionRecords()];
+    try {
+      localStorage.setItem('sema_submissions', JSON.stringify(initial));
     } catch {
       // ignore
     }
-    return INITIAL_SUBMISSIONS;
+    return initial;
   });
 
   const fetchSubmissionsFromApi = useCallback(async () => {
@@ -89,12 +108,18 @@ export default function App() {
       if (res.ok && contentType && contentType.includes('application/json')) {
         const data = await res.json();
         if (data && Array.isArray(data.submissions) && data.submissions.length > 0) {
-          setSubmissions(data.submissions);
-          try {
-            localStorage.setItem('sema_submissions', JSON.stringify(data.submissions));
-          } catch {
-            // ignore
-          }
+          setSubmissions((prev) => {
+            const map = new Map<string, SubmissionRecord>();
+            prev.forEach((s) => map.set(s.id, s));
+            data.submissions.forEach((s: SubmissionRecord) => map.set(s.id, s));
+            const merged = Array.from(map.values());
+            try {
+              localStorage.setItem('sema_submissions', JSON.stringify(merged));
+            } catch (err) {
+              console.warn('Failed to persist submissions to localStorage', err);
+            }
+            return merged;
+          });
         }
       }
     } catch {
@@ -215,9 +240,9 @@ export default function App() {
       const exists = prev.some((s) => s.id === record.id);
       const updated = exists ? prev.map((s) => (s.id === record.id ? record : s)) : [record, ...prev];
       try {
-        localStorage.setItem('sema_submissions', JSON.stringify(updated.slice(0, 150)));
-      } catch {
-        // ignore
+        localStorage.setItem('sema_submissions', JSON.stringify(updated));
+      } catch (err) {
+        console.warn('Failed to persist submissions to localStorage', err);
       }
       return updated;
     });
@@ -227,12 +252,21 @@ export default function App() {
     setSubmissions((prev) => {
       const updated = prev.map((s) => (s.id === updatedSub.id ? updatedSub : s));
       try {
-        localStorage.setItem('sema_submissions', JSON.stringify(updated.slice(0, 150)));
-      } catch {
-        // ignore
+        localStorage.setItem('sema_submissions', JSON.stringify(updated));
+      } catch (err) {
+        console.warn('Failed to persist submissions to localStorage', err);
       }
       return updated;
     });
+  };
+
+  const handleSetSubmissions = (newSubs: SubmissionRecord[]) => {
+    setSubmissions(newSubs);
+    try {
+      localStorage.setItem('sema_submissions', JSON.stringify(newSubs));
+    } catch (err) {
+      console.warn('Failed to persist submissions to localStorage', err);
+    }
   };
 
   const unassignedCount = submissions.filter(
@@ -248,7 +282,7 @@ export default function App() {
           onNewSubmission={handleNewSubmission}
           onRefreshSubmissions={fetchSubmissionsFromApi}
           onSwitchToCitizenView={handleSwitchToCitizen}
-          onSetSubmissions={setSubmissions}
+          onSetSubmissions={handleSetSubmissions}
         />
       ) : (
         <div id="top" className="min-h-screen flex flex-col justify-between bg-white text-slate-900">

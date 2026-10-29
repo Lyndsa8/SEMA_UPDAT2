@@ -4,6 +4,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { createServer as createViteServer } from 'vite';
 import { GoogleGenAI, Type } from '@google/genai';
+import demoComplaintsData from './src/data/demoComplaints.json';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -660,6 +661,58 @@ Automated alert dispatched by Safaricom SEMA Intelligent NOC Operations.
     },
     createdAt: new Date(Date.now() - 1000 * 60 * 95).toISOString(),
   },
+  ...((demoComplaintsData?.records || []).map((rec) => {
+    const minutesAgo = rec.minutesAgo || 0;
+    const createdAt = new Date(Date.now() - minutesAgo * 60 * 1000).toISOString();
+    const classification = determineClassificationRuleBased(rec.text);
+    const matchedTeam =
+      KENYAN_RESPONSE_TEAMS.find((t) => t.name === classification.recommendedTeam) ||
+      KENYAN_RESPONSE_TEAMS[0];
+
+    let locationTown = 'Nairobi';
+    const cw = (rec.countyOrWard || '').toLowerCase();
+    if (cw.includes('ruaka')) locationTown = 'Ruaka';
+    else if (cw.includes('nyali') || cw.includes('mombasa')) locationTown = 'Mombasa';
+    else if (cw.includes('nakuru')) locationTown = 'Nakuru';
+    else if (cw.includes('kisumu')) locationTown = 'Kisumu';
+    else if (cw.includes('eldoret')) locationTown = 'Eldoret';
+    else if (cw.includes('nyeri')) locationTown = 'Nyeri';
+    else if (cw.includes('kiambu')) locationTown = 'Kiambu';
+
+    const randCode = Math.floor(1000 + Math.random() * 9000);
+    return {
+      id: rec.id,
+      referenceCode: `SEMA-SAF-${randCode}`,
+      text: rec.text,
+      detectedLanguage: (rec.detectedLanguage as any) || 'English',
+      englishTranslation: rec.detectedLanguage !== 'English' ? `Translation: ${rec.text}` : undefined,
+      category: rec.operationalCategory || classification.category,
+      countyOrWard: rec.countyOrWard,
+      locationTown,
+      contactInfo: rec.contactInfo || undefined,
+      captureMethod: (rec.inflowChannel === 'Web Voice Portal' ? 'voice' : 'text') as 'voice' | 'text',
+      aiCommitmentResponse: `SEMA automated dispatch: Incident logged via ${rec.inflowChannel} from ${rec.countyOrWard}. Dispatched to ${matchedTeam.name}.`,
+      status: 'Received' as ReportStatus,
+      priority: classification.urgency,
+      assignedTeam: undefined,
+      assignedOfficer: undefined,
+      assignedOfficerEmail: undefined,
+      channel: rec.inflowChannel,
+      operationalCategory: rec.operationalCategory,
+      handle: rec.handle || undefined,
+      latitude: typeof rec.latitude === 'number' ? rec.latitude : undefined,
+      longitude: typeof rec.longitude === 'number' ? rec.longitude : undefined,
+      isSyncedFeed: true,
+      aiClassification: classification,
+      sentiment: classification.sentiment,
+      tensionLevel: classification.tensionLevel,
+      frustrationScore: classification.frustrationScore,
+      isHighTension: classification.isHighTension,
+      tensionFactors: classification.tensionFactors,
+      tensionNotes: classification.tensionNotes,
+      createdAt,
+    };
+  })),
 ];
 
 async function startServer() {
@@ -987,6 +1040,296 @@ Rules:
       }
     }
     return res.json({ success: true, removedCount: initialLen - submissionsStore.length });
+  });
+
+  // Smart Triage Batch Endpoint (up to 15 tickets per Gemini call)
+  app.post('/api/triage/batch', async (req, res) => {
+    try {
+      const { tickets = [] } = req.body;
+      if (!Array.isArray(tickets) || tickets.length === 0) {
+        return res.json({ triagedTickets: [], issueGroups: [] });
+      }
+
+      const batch = tickets.slice(0, 15);
+      const ai = getGenAIClient();
+
+      if (ai) {
+        try {
+          const prompt = `You are the Lead Incident Triage AI for Safaricom SEMA in Kenya.
+Analyze these incoming incident tickets (${batch.length} tickets) together in a single batch.
+
+Available official response teams:
+- Safaricom Home Fibre & Enterprise NOC (Fixed internet, optical fibre, router red LOS, ONT)
+- M-PESA Escalations & Reversals Operations (M-PESA transactions, reversals, Till/Paybill stuck, Fuliza)
+- 4G / 5G Mobile Network & Base Transceiver (BTS) Team (Cellular towers, 4G/5G signal, coverage, slow mobile data, call drops)
+- SIM Swap, Identity Protection & Cyber-Fraud Unit (SIM swaps, scams, tapeli, unauthorized line takeover, hacking, PUK)
+- Customer Experience & Airtime Billing Desk (Customer care, airtime deductions, Bonga points, billing queries)
+- Enterprise Business Solutions & Cloud Desk (Dedicated leased lines, corporate cloud, bulk SMS)
+- Lipa Na M-PESA & Merchant Services Desk (Merchant till issues, settlement callbacks, buy goods)
+
+CRITICAL RULES:
+1. INTENT: Classify each ticket as "Complaint", "Enquiry", "Compliment", or "Spam".
+   - Compliments (praise, gratitude, e.g. "shukrani", "asante", "hongera") MUST have intent="Compliment". Compliments are not incidents: draft a warm thank-you reply.
+   - Enquiries (asking questions, e.g., how to redeem points, APN settings, invoice copy) MUST have intent="Enquiry". Provide self-help steps or route to Customer Care.
+2. TEAMS & FRAUD SAFETY:
+   - All SIM swap and fraud concerns MUST be High or Urgent priority and assigned to "SIM Swap, Identity Protection & Cyber-Fraud Unit".
+   - Customer advice / resolution steps MUST NEVER ask for a PIN, OTP, or ID number.
+   - If no existing team fits, you may propose a NEW team (name, code, scope) with lead "To be assigned".
+3. CONSISTENCY OF RESOLUTION STEPS:
+   - Provide exactly 3 actionable resolution steps strictly matching the ticket's category.
+   - NO optical, fibre, or OTDR steps UNLESS the category is Fibre!
+4. TRANSLATION:
+   - Provide a natural, real English translation (never just a verbatim copy of Kiswahili or Sheng text).
+5. ISSUE GROUPS & LINKING:
+   - Group related tickets (same service, same area, similar time or same contact/person across channels) under a shared issueGroupId (e.g., "grp-ruaka-fibre", "grp-nyali-data", "grp-repeat-mwangi").
+   - For each issueGroup, provide an id, a title, and a possible cause.
+   - For possibleCause: Do NOT mention road construction, an excavator, or an optical cut UNLESS the grouped tickets are genuinely about fibre. Always format as "Possible cause (AI hypothesis): ...".
+
+Input tickets:
+${JSON.stringify(
+  batch.map((t: any) => ({
+    id: t.id,
+    text: t.text,
+    channel: t.channel || t.inflowChannel,
+    operationalCategory: t.operationalCategory,
+    category: t.category,
+    countyOrWard: t.countyOrWard,
+    locationTown: t.locationTown,
+    contactInfo: t.contactInfo,
+    detectedLanguage: t.detectedLanguage,
+    createdAt: t.createdAt,
+  })),
+  null,
+  2
+)}`;
+
+          const response = await ai.models.generateContent({
+            model: 'gemini-3.8-flash',
+            contents: prompt,
+            config: {
+              responseMimeType: 'application/json',
+              responseSchema: {
+                type: Type.OBJECT,
+                properties: {
+                  triagedTickets: {
+                    type: Type.ARRAY,
+                    items: {
+                      type: Type.OBJECT,
+                      properties: {
+                        id: { type: Type.STRING },
+                        intent: { type: Type.STRING },
+                        category: { type: Type.STRING },
+                        urgency: { type: Type.STRING },
+                        confidence: { type: Type.NUMBER },
+                        bestTeam: { type: Type.STRING },
+                        proposedTeam: {
+                          type: Type.OBJECT,
+                          properties: {
+                            name: { type: Type.STRING },
+                            code: { type: Type.STRING },
+                            scope: { type: Type.STRING },
+                          },
+                        },
+                        englishTranslation: { type: Type.STRING },
+                        resolutionSteps: {
+                          type: Type.ARRAY,
+                          items: { type: Type.STRING },
+                        },
+                        issueGroupId: { type: Type.STRING },
+                        thankYouReply: { type: Type.STRING },
+                      },
+                      required: [
+                        'id',
+                        'intent',
+                        'category',
+                        'urgency',
+                        'confidence',
+                        'bestTeam',
+                        'englishTranslation',
+                        'resolutionSteps',
+                        'issueGroupId',
+                      ],
+                    },
+                  },
+                  issueGroups: {
+                    type: Type.ARRAY,
+                    items: {
+                      type: Type.OBJECT,
+                      properties: {
+                        id: { type: Type.STRING },
+                        title: { type: Type.STRING },
+                        possibleCause: { type: Type.STRING },
+                      },
+                      required: ['id', 'title', 'possibleCause'],
+                    },
+                  },
+                },
+                required: ['triagedTickets', 'issueGroups'],
+              },
+            },
+          });
+
+          const parsed = JSON.parse(response.text || '{}');
+          if (parsed.triagedTickets && Array.isArray(parsed.triagedTickets)) {
+            return res.json(parsed);
+          }
+        } catch (aiErr) {
+          console.warn('Gemini batch triage call failed, falling back to rule-based triage:', aiErr);
+        }
+      }
+
+      // Rule-based fallback triage
+      const triagedTickets = batch.map((ticket: any) => {
+        const text = ticket.text || '';
+        const lower = text.toLowerCase();
+        let intent: 'Complaint' | 'Enquiry' | 'Compliment' | 'Spam' = 'Complaint';
+        if (
+          lower.includes('shukrani') ||
+          lower.includes('asante') ||
+          lower.includes('hongera') ||
+          lower.includes('thank')
+        ) {
+          intent = 'Compliment';
+        } else if (
+          lower.includes('inquiry') ||
+          lower.includes('kujua') ||
+          lower.includes('how to') ||
+          lower.includes('settings') ||
+          lower.includes('apn') ||
+          lower.includes('invoice') ||
+          lower.includes('inquire')
+        ) {
+          intent = 'Enquiry';
+        }
+
+        let category = ticket.operationalCategory || ticket.category || 'Mobile Network & 4G/5G Coverage';
+        let urgency: PriorityLevel = 'Medium';
+        let bestTeam = 'Customer Experience & Airtime Billing Desk';
+
+        if (
+          lower.includes('sim swap') ||
+          lower.includes('fraud') ||
+          lower.includes('tapeli') ||
+          lower.includes('puk') ||
+          lower.includes('hack')
+        ) {
+          category = 'SIM Swap, Fraud & Security';
+          bestTeam = 'SIM Swap, Identity Protection & Cyber-Fraud Unit';
+          urgency = 'High';
+        } else if (/fibre|fiber/i.test(category) || lower.includes('fibre') || lower.includes('router') || lower.includes('red light')) {
+          category = 'Home Fibre & Fixed Internet';
+          bestTeam = 'Safaricom Home Fibre & Enterprise NOC';
+          urgency = lower.includes('red') || lower.includes('down') ? 'Urgent' : 'High';
+        } else if (/mpesa|m-pesa/i.test(category) || lower.includes('mpesa') || lower.includes('m-pesa') || lower.includes('till') || lower.includes('paybill')) {
+          category = 'M-PESA & Financial Services';
+          bestTeam = 'M-PESA Escalations & Reversals Operations';
+          urgency = lower.includes('hospital') || lower.includes('stuck') ? 'Urgent' : 'High';
+        } else if (/slow|data|coverage|4g|5g/i.test(category) || lower.includes('speed') || lower.includes('4g') || lower.includes('5g')) {
+          category = 'Mobile Network & 4G/5G Coverage';
+          bestTeam = '4G / 5G Mobile Network & Base Transceiver (BTS) Team';
+          urgency = 'Medium';
+        }
+
+        let translation = text;
+        if (lower.includes('shukrani')) {
+          translation = 'Thank you Safaricom care desk at Thika Road Mall for helping me replace my lost SIM line.';
+        } else if (lower.includes('router inawaka red') || lower.includes('fiber imekatika')) {
+          translation = 'Our fiber internet connection has been cut in Ruaka since morning, router shows red LOS light. Please dispatch technicians to fix it.';
+        } else if (lower.includes('taa nyekundu inawaka')) {
+          translation = 'Hello, home internet has not been working in Ruaka since 8:00 AM. A red light is blinking on the router.';
+        } else if (lower.includes('chapaa ya m-pesa imekwama')) {
+          translation = 'M-PESA money is stuck on a hospital Paybill since morning, confirmation SMS not received and patient cannot be discharged. Alert M-PESA team to resolve quickly!';
+        } else if (lower.includes('pesa haijafika kwa merchant')) {
+          translation = 'Hello Safaricom, M-PESA Paybill payment is stuck in Ruaka and funds have not reached the hospital merchant account.';
+        }
+
+        let resolutionSteps: string[] = [];
+        if (/fibre|fiber/i.test(category)) {
+          resolutionSteps = [
+            'Dispatch field metro optical splicing van with OTDR fault locator to local distribution cabinet.',
+            'Test optical power level at terminal (target below -24.0 dBm) and re-splice severed fiber strands.',
+            'Re-bind ONT MAC address in OLT terminal and broadcast recovery verification memo to subscriber.',
+          ];
+        } else if (/mpesa|m-pesa/i.test(category)) {
+          resolutionSteps = [
+            'Query core M-PESA G2 financial switch ledger for MSISDN transaction token and state.',
+            'Initiate automated transaction reconciliation and push forced settlement callback to merchant gateway.',
+            'Dispatch SMS reversal or completion confirmation directly to customer line.',
+          ];
+        } else if (/sim swap|fraud/i.test(category)) {
+          resolutionSteps = [
+            'Verify subscriber identity via official Safaricom KYC biometric channel and flag security ticket.',
+            'Place immediate emergency freeze on unauthorized SIM replacement to prevent financial compromise.',
+            'Advise customer to visit nearest Safaricom Shop with National ID; never disclose PIN or one-time codes.',
+          ];
+        } else {
+          resolutionSteps = [
+            'Analyze Radio Access Network (RAN) sector performance, traffic load, and antenna azimuth alignment.',
+            'Execute remote frequency carrier re-allocation and restart degraded base transceiver baseband unit.',
+            'Dispatch field RF engineer for on-site microwave backhaul power audit if sector fails diagnostic.',
+          ];
+        }
+
+        let issueGroupId = `grp-single-${ticket.id}`;
+        if (lower.includes('ruaka') && /fibre|fiber/i.test(category)) {
+          issueGroupId = 'grp-ruaka-fibre';
+        } else if (lower.includes('ruaka') && /mpesa|m-pesa/i.test(category)) {
+          issueGroupId = 'grp-ruaka-mpesa';
+        } else if (lower.includes('nyali')) {
+          issueGroupId = 'grp-nyali-data';
+        } else if (ticket.contactInfo === '0722123456') {
+          issueGroupId = 'grp-repeat-mwangi';
+        }
+
+        return {
+          id: ticket.id,
+          intent,
+          category,
+          urgency,
+          confidence: 0.92,
+          bestTeam,
+          englishTranslation: translation,
+          resolutionSteps,
+          issueGroupId,
+          thankYouReply:
+            intent === 'Compliment'
+              ? 'Thank you for your warm compliment! Safaricom appreciates your trust and remains dedicated to delivering world-class service.'
+              : undefined,
+          needsReview: true,
+        };
+      });
+
+      const issueGroups = [
+        {
+          id: 'grp-ruaka-fibre',
+          title: 'Ruaka Home Fibre Corridor Outage',
+          possibleCause:
+            'Possible cause (AI hypothesis): Local optical fiber feeder fault or cable damage in Ruaka corridor causing red LOS alarms across residential endpoints.',
+        },
+        {
+          id: 'grp-ruaka-mpesa',
+          title: 'Ruaka M-PESA & Merchant Settlement Timeouts',
+          possibleCause:
+            'Possible cause (AI hypothesis): Transmission packet loss or gateway callback timeout affecting local payment terminals and merchant verification in Ruaka.',
+        },
+        {
+          id: 'grp-nyali-data',
+          title: 'Nyali Mombasa 4G/5G Cellular Data Degradation',
+          possibleCause:
+            'Possible cause (AI hypothesis): High sector congestion and microwave backhaul saturation affecting cellular data throughput in Nyali.',
+        },
+        {
+          id: 'grp-repeat-mwangi',
+          title: 'Cross-Channel Repeated Billing Escalation',
+          possibleCause:
+            'Possible cause (AI hypothesis): Airtime top-up deduction reconciliation delay between payment gateway and subscriber balance ledger.',
+        },
+      ];
+
+      return res.json({ triagedTickets, issueGroups });
+    } catch (err: any) {
+      return res.status(500).json({ error: err?.message || 'Triage failed' });
+    }
   });
 
   // 6. Admin: AI Classify Single Submission

@@ -4,7 +4,7 @@ export type DetectedLanguageLabel = 'English' | 'Kiswahili' | 'Sheng';
 
 export type PriorityLevel = 'Urgent' | 'High' | 'Medium' | 'Routine';
 
-export type ReportStatus = 'Received' | 'Assigned' | 'In Progress' | 'Resolved' | 'Closed';
+export type ReportStatus = 'Received' | 'Assigned' | 'In Progress' | 'Resolved' | 'Closed' | 'Feedback';
 
 export type CitizenSentiment = 'Frustrated' | 'Distressed' | 'Angry' | 'Urgent' | 'Neutral' | 'Constructive';
 
@@ -91,6 +91,15 @@ export interface SubmissionRecord {
   // AI Resolution Insights
   aiResolutionSteps?: string[];
   aiRootCause?: string;
+  // Smart Triage & Linking
+  intent?: 'Complaint' | 'Enquiry' | 'Compliment' | 'Spam';
+  issueGroupId?: string;
+  issueGroupTitle?: string;
+  issueGroupCause?: string;
+  thankYouReply?: string;
+  selfHelpSteps?: string[];
+  confidence?: number;
+  proposedTeam?: { name: string; code: string; scope: string };
   // Sentiment Analysis & High Tension Flagging
   sentiment?: CitizenSentiment;
   tensionLevel?: TensionLevel;
@@ -128,6 +137,8 @@ export interface ResponseTeam {
   phone: string;
   activeCount: number;
   color: 'emerald' | 'sky' | 'amber' | 'rose' | 'teal' | 'lime' | 'indigo';
+  isAiSuggested?: boolean;
+  scope?: string;
 }
 
 export const KENYAN_RESPONSE_TEAMS: ResponseTeam[] = [
